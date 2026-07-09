@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>宝塔多面板 Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{
+    --bg:#0f1115; --card:#171a21; --border:#262b36; --text:#e6e8ee;
+    --muted:#8a90a2; --ok:#3ecf8e; --warn:#f5a623; --bad:#f0506e; --accent:#5b8cff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+       background:var(--bg);color:var(--text)}
+  header{padding:20px 28px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+  header h1{font-size:18px;margin:0;font-weight:600}
+  header .meta{color:var(--muted);font-size:12px}
+  #grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px;padding:20px 28px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h2{margin:0 0 4px;font-size:15px;display:flex;align-items:center;gap:8px}
+  .dot{width:9px;height:9px;border-radius:50%;display:inline-block}
+  .dot.ok{background:var(--ok)} .dot.bad{background:var(--bad)}
+  .url{color:var(--muted);font-size:12px;margin-bottom:12px;word-break:break-all}
+  .row{display:flex;justify-content:space-between;font-size:13px;padding:4px 0;border-bottom:1px dashed var(--border)}
+  .row:last-child{border-bottom:none}
+  .row .k{color:var(--muted)}
+  .bar{height:6px;border-radius:4px;background:#232732;overflow:hidden;margin-top:3px}
+  .bar>span{display:block;height:100%;background:var(--accent)}
+  .bar.warn>span{background:var(--warn)} .bar.bad>span{background:var(--bad)}
+  .section-title{font-size:12px;color:var(--muted);margin:12px 0 6px;text-transform:uppercase;letter-spacing:.04em}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  td,th{padding:3px 4px;text-align:left;border-bottom:1px solid var(--border)}
+  .badge{display:inline-block;padding:1px 6px;border-radius:10px;font-size:11px}
+  .badge.ok{background:rgba(62,207,142,.15);color:var(--ok)}
+  .badge.bad{background:rgba(240,80,110,.15);color:var(--bad)}
+  .err{color:var(--bad);font-size:12px;white-space:pre-wrap}
+  details{margin-top:8px}
+  summary{cursor:pointer;color:var(--muted);font-size:11px}
+  pre{max-height:200px;overflow:auto;font-size:11px;background:#0c0e13;padding:8px;border-radius:6px}
+  #empty{padding:60px;text-align:center;color:var(--muted)}
+</style>
+</head>
+<body>
+<header>
+  <h1>🐯 宝塔多面板 Dashboard</h1>
+  <div class="meta" id="updated">加载中…</div>
+</header>
+<div id="grid"></div>
+<div id="empty" style="display:none">未配置任何面板，请编辑 config.yaml 后重启服务。</div>
+
+<script>
+const REFRESH_MS = 15000;
+
+function fmtBytes(v){
+  if(v === undefined || v === null) return '-';
+  if(typeof v === 'string') return v;
+  const units=['B','KB','MB','GB','TB']; let i=0;
+  while(v>=1024 && i<units.length-1){v/=1024;i++;}
+  return v.toFixed(1)+units[i];
+}
+
+function pct(used,total){
+  if(!total) return 0;
+  return Math.min(100, Math.round((used/total)*100));
+}
+
+function barClass(p){
+  if(p>=90) return 'bad';
+  if(p>=70) return 'warn';
+  return '';
+}
+
+function renderSystem(sys, net){
+  if(!sys && !net) return '<div class="err">无数据</div>';
+  let html = '';
+  if(sys){
+    const memUsed = sys.MemRealUsed ?? sys.memRealUsed;
+    const memTotal = sys.MemTotal ?? sys.memTotal;
+    const cpuUsed = sys.cpuRealUsed ?? sys.CpuRealUsed ?? (net && net.cpu ? net.cpu[0] : undefined);
+    html += `<div class="row"><span class="k">系统</span><span>${sys.system ?? '-'}</span></div>`;
+    html += `<div class="row"><span class="k">运行时长</span><span>${sys.time ?? '-'}</span></div>`;
+    if(cpuUsed !== undefined){
+      html += `<div class="row"><span class="k">CPU</span><span>${Number(cpuUsed).toFixed(1)}%</span></div>
+        <div class="bar ${barClass(cpuUsed)}"><span style="width:${Math.min(100,cpuUsed)}%"></span></div>`;
+    }
+    if(memUsed !== undefined && memTotal){
+      const p = pct(memUsed, memTotal);
+      html += `<div class="row"><span class="k">内存</span><span>${memUsed}G / ${memTotal}G</span></div>
+        <div class="bar ${barClass(p)}"><span style="width:${p}%"></span></div>`;
+    }
+  }
+  if(net && net.load){
+    const l = net.load;
+    html += `<div class="row"><span class="k">负载 (1/5/15)</span><span>${l.one} / ${l.five} / ${l.fifteen}</span></div>`;
+  }
+  if(net){
+    html += `<div class="row"><span class="k">网络 ↑/↓</span><span>${fmtBytes(net.up*1024)}/s ↑ &nbsp; ${fmtBytes(net.down*1024)}/s ↓</span></div>`;
+  }
+  return html || '<div class="err">无数据</div>';
+}
+
+function renderDisk(disk){
+  if(!disk || !disk.length) return '<div class="err">无数据</div>';
+  let html = '<table>';
+  disk.forEach(d=>{
+    const size = d.size || [];
+    const [total, used, avail, percentStr] = size;
+    const p = parseInt(percentStr) || 0;
+    html += `<tr><td>${d.path||'-'}</td><td>${used||'-'}/${total||'-'}</td>
+      <td><span class="badge ${p>=85?'bad':'ok'}">${percentStr||p+'%'}</span></td></tr>`;
+  });
+  html += '</table>';
+  return html;
+}
+
+function renderSites(sites){
+  const list = (sites && sites.data) || (Array.isArray(sites) ? sites : null);
+  if(!list) return '<div class="err">无数据</div>';
+  if(!list.length) return '<div class="row"><span class="k">站点数</span><span>0</span></div>';
+  let html = `<div class="row"><span class="k">站点总数</span><span>${list.length}</span></div><table>`;
+  list.slice(0,8).forEach(s=>{
+    const name = s.name || s.domain || '-';
+    const status = (s.status === '1' || s.status === 1 || s.status === true) ? 'ok' : 'bad';
+    const statusText = status === 'ok' ? '运行中' : (s.status ?? '未知');
+    const edate = s.edate || s.expire || '';
+    html += `<tr><td>${name}</td><td><span class="badge ${status}">${statusText}</span></td><td>${edate}</td></tr>`;
+  });
+  html += '</table>';
+  if(list.length > 8) html += `<div class="row"><span class="k"></span><span>… 共 ${list.length} 个站点</span></div>`;
+  return html;
+}
+
+function renderDatabases(dbs){
+  const list = (dbs && dbs.data) || (Array.isArray(dbs) ? dbs : null);
+  if(!list) return '<div class="err">无数据</div>';
+  return `<div class="row"><span class="k">数据库总数</span><span>${list.length}</span></div>`;
+}
+
+function renderCard(p){
+  const online = p.online !== false;
+  const dot = online ? 'ok' : 'bad';
+  let body = '';
+  if(!online){
+    body += `<div class="err">${p.error || '无法连接该面板'}</div>`;
+  }
+  body += `<div class="section-title">系统状态</div>${renderSystem(p.system, p.network)}`;
+  body += `<div class="section-title">磁盘</div>${renderDisk(p.disk)}`;
+  body += `<div class="section-title">网站</div>${renderSites(p.sites)}`;
+  body += `<div class="section-title">数据库</div>${renderDatabases(p.databases)}`;
+  body += `<details><summary>查看原始数据</summary><pre>${escapeHtml(JSON.stringify(p, null, 2))}</pre></details>`;
+  return `<div class="card">
+    <h2><span class="dot ${dot}"></span>${p.name || '未命名面板'}</h2>
+    <div class="url">${p.url || ''}</div>
+    ${body}
+  </div>`;
+}
+
+function escapeHtml(s){
+  return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+}
+
+async function refresh(){
+  try{
+    const res = await fetch('/api/status');
+    const data = await res.json();
+    const grid = document.getElementById('grid');
+    const empty = document.getElementById('empty');
+    if(data.error){
+      grid.innerHTML = '';
+      empty.style.display = 'block';
+      empty.textContent = data.error;
+      return;
+    }
+    const panels = data.panels || [];
+    if(!panels.length){
+      grid.innerHTML = '';
+      empty.style.display = 'block';
+      return;
+    }
+    empty.style.display = 'none';
+    grid.innerHTML = panels.map(renderCard).join('');
+    document.getElementById('updated').textContent =
+      '最后更新: ' + new Date((data.ts||Date.now()/1000)*1000).toLocaleTimeString() + (data.cached ? '（缓存）' : '');
+  }catch(e){
+    document.getElementById('updated').textContent = '刷新失败: ' + e;
+  }
+}
+
+refresh();
+setInterval(refresh, REFRESH_MS);
+</script>
+</body>
+</html>
