@@ -69,8 +69,61 @@ Open `http://127.0.0.1:5000` in your browser to see the aggregated dashboard.
 ## Security notes
 
 - `config.yaml` holds plaintext secrets — keep it out of public repos (already excluded via `.gitignore`).
-- Deploy this behind an internal network / VPN, or put Nginx Basic Auth in front of it. Don't expose it directly to the public internet.
 - Don't run Flask's dev server in production; use `gunicorn app:app` behind a reverse proxy instead.
+
+### Recommended architecture: Panopticon stays public, BT Panel admin is WireGuard-only
+
+For day-to-day checks (status, alerts) you hit Panopticon directly over the public internet — no
+VPN client needed. For anything sensitive (databases, etc.) you log into the actual BT Panel admin
+UI, and **that admin UI is never reachable from the public internet**, only from inside WireGuard.
+API traffic between Panopticon and every panel also stays inside the WireGuard tunnel.
+
+```
+[you, anywhere] --public HTTPS--> [Panopticon dashboard, always public, login + brute-force lockout]
+                                          │
+                                    WireGuard tunnel (the dashboard is a peer on this mesh)
+                                          │
+                              [BT Panel admin UI, no public access at all, WireGuard-only, port 1810]
+```
+
+1. **Move the panel port and close it to the public entirely**: Panel dashboard → Settings → Panel Port → `1810`. Then on each BT Panel server, deny that port publicly and only allow it from the WireGuard subnet with `ufw`:
+   ```bash
+   ufw deny 1810/tcp
+   ufw allow in on wg0 to any port 1810 proto tcp
+   ```
+   Site ports (if the box also serves public sites) are unaffected. You can also set the panel's **IP whitelist** to the WireGuard internal IP as a second layer.
+
+2. **Mesh**: the server running Panopticon joins the same WireGuard subnet (e.g. `10.10.0.0/24`) as every panel. It still serves HTTP(S) to the public internet, but all outbound calls to panel APIs go out over its own WireGuard interface, never touching the public internet.
+
+3. **Dashboard config**: set each panel's `url` in `config.yaml` to its WireGuard internal address on port 1810, e.g. `http://10.10.0.2:1810` (swap in your real internal IPs — no need to share them with me).
+
+4. **Lock down Panopticon itself (important)**: since it's public and holds credentials that reach into your WireGuard network and call every panel's API, it needs a login. This is built in — see the next section.
+
+### Login + brute-force protection on Panopticon itself
+
+`app.py` has built-in HTTP Basic Auth plus per-IP failure lockout, disabled by default
+(`dashboard_auth.enabled: false`). **Turn it on before exposing this publicly**:
+
+```bash
+python gen_password_hash.py "your password"   # generates a hash — never put a plaintext password in config.yaml
+```
+
+Paste the output into `config.yaml`:
+
+```yaml
+dashboard_auth:
+  enabled: true
+  username: "mizuki"
+  password_hash: "the hash from the previous step"
+  max_attempts: 5        # lock an IP out after this many consecutive failures
+  lockout_seconds: 900   # lockout duration in seconds, default 15 minutes
+```
+
+Behavior: no/invalid credentials → 401. Once one IP accumulates `max_attempts` failures, every
+subsequent request from it — even with the correct password — gets a 429 until the lockout window
+passes. Lockout state lives in memory and resets when the dashboard restarts.
+
+If you only ever access Panopticon from inside WireGuard and don't plan to expose it publicly, leave `enabled: false` and skip the password prompt entirely.
 
 ## Ideas for extension
 

@@ -65,8 +65,59 @@ python app.py
 ## 安全提示
 
 - `config.yaml` 里是明文密钥，注意权限控制，不要提交到公开代码仓库（本仓库已通过 `.gitignore` 排除）。
-- 建议把本 Dashboard 部署在内网或加一层 Nginx Basic Auth / VPN 访问，不要直接暴露公网。
 - 生产环境不要用 Flask 自带的开发服务器，可用 `gunicorn app:app` 或反向代理。
+
+### 推荐架构：Panopticon 长期公网可见，宝塔面板后台完全收进 WireGuard
+
+日常小操作（看状态、看告警）直接公网访问 Panopticon，不用连 VPN；真要动数据库这类敏感操作，
+必须登录宝塔面板后台，而**面板后台完全不对公网开放**，只能从 WireGuard 内网连。Panopticon 和
+各台面板之间的 API 通信，也全程走 WireGuard 隧道。
+
+```
+[你，随时随地] --公网 HTTPS--> [Panopticon Dashboard，一直暴露公网，带登录+防爆破]
+                                          │
+                                    WireGuard 隧道（Dashboard 是 WG 里的一个节点）
+                                          │
+                              [宝塔面板后台，完全不对公网开放，只信 WireGuard，端口 1810]
+```
+
+1. **面板改端口 + 完全关闭公网访问**：面板后台 → 设置 → 面板端口改成 `1810`。然后在每台宝塔服务器上用 `ufw` 彻底拒绝公网访问该端口，只放行 WireGuard 网段：
+   ```bash
+   ufw deny 1810/tcp
+   ufw allow in on wg0 to any port 1810 proto tcp
+   ```
+   网站端口（如果有对外服务）不受影响，正常放行。面板的 **IP 白名单** 也可以顺手填成 WireGuard 内网 IP 作为双保险。
+
+2. **组网**：Panopticon 所在的服务器，作为 WireGuard 的一个节点加入你的私有网段（如 `10.10.0.0/24`），这样它虽然对公网开放 HTTP(S) 服务，但访问面板 API 时走的是它自己的 WireGuard 出口，不经过公网。
+
+3. **Dashboard 侧配置**：`config.yaml` 里每台面板的 `url` 填该面板的 WireGuard 内网地址 + 1810 端口，例如 `http://10.10.0.2:1810`（把 `10.10.0.x` 换成你自己的真实内网 IP，不用告诉我）。
+
+4. **给 Panopticon 本身加登录门槛（关键）**：既然它要长期公网暴露，而且手里握着能连进你 WireGuard 内网、调用所有面板 API 的凭证，必须有登录验证，否则等于把内网入口的钥匙放在门口。本项目内置了这个能力，见下一节。
+
+### Panopticon 自身的登录验证 + 防暴力破解
+
+`app.py` 内置了一层 HTTP Basic Auth，外加按来源 IP 的失败次数锁定，默认关闭（`dashboard_auth.enabled: false`），
+**只要打算公网暴露就必须打开**：
+
+```bash
+python gen_password_hash.py "你的密码"   # 生成哈希，不要在 config.yaml 里写明文密码
+```
+
+把输出粘到 `config.yaml`：
+
+```yaml
+dashboard_auth:
+  enabled: true
+  username: "mizuki"
+  password_hash: "上一步生成的哈希"
+  max_attempts: 5        # 同一 IP 连续失败这么多次后锁定
+  lockout_seconds: 900   # 锁定时长（秒），默认 15 分钟
+```
+
+行为：没有认证头或用户名密码不对 → 401；同一 IP 累计失败次数达到 `max_attempts` → 后续请求（哪怕密码是对的）
+都会被 429 拒绝，直到锁定期过去。锁定状态存在内存里，重启 Dashboard 会重置。
+
+如果你只打算在 WireGuard 内网访问 Panopticon（不公网暴露），`enabled` 保持 `false` 即可，省掉每次输密码的麻烦。
 
 ## 可扩展方向
 

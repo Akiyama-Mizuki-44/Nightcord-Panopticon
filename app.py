@@ -11,15 +11,19 @@ import threading
 import time
 import yaml
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from flask import Flask, jsonify, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, Response
+from werkzeug.security import check_password_hash
 
 from bt_client import BTClient
 from notifier import Notifier, evaluate_alerts
+from auth import BruteForceGuard, get_client_ip
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.yaml")
 
 app = Flask(__name__, static_folder=os.path.join(BASE_DIR, "static"))
+
+_brute_force_guard = BruteForceGuard()  # 默认 5 次失败锁 15 分钟，实际阈值以 config.yaml 为准（见 enforce_auth）
 
 # 简单内存缓存，避免每次刷新都重新请求所有面板
 _cache = {"data": None, "ts": 0}
@@ -39,6 +43,53 @@ def load_config():
 
 def load_panels():
     return load_config().get("panels", [])
+
+
+@app.before_request
+def enforce_auth():
+    """
+    Dashboard 现在按设计要长期暴露公网，所以给所有路由加一层 HTTP Basic Auth，
+    并按来源 IP 做暴力破解锁定。dashboard_auth.enabled 为 false（默认）时不做任何限制，
+    适合只在 WireGuard 内网访问、不打算公网暴露的部署方式。
+    """
+    try:
+        cfg = load_config()
+    except RuntimeError:
+        return  # 还没配置 config.yaml，让后续逻辑走正常的报错路径
+    auth_cfg = cfg.get("dashboard_auth", {})
+    if not auth_cfg.get("enabled"):
+        return
+
+    _brute_force_guard.max_attempts = auth_cfg.get("max_attempts", 5)
+    _brute_force_guard.lockout_seconds = auth_cfg.get("lockout_seconds", 900)
+
+    ip = get_client_ip(request)
+    locked, retry_after = _brute_force_guard.is_locked(ip)
+    if locked:
+        resp = Response(f"失败次数过多，请 {retry_after} 秒后再试。", status=429)
+        resp.headers["Retry-After"] = str(retry_after)
+        return resp
+
+    auth = request.authorization
+    expected_user = auth_cfg.get("username", "")
+    expected_hash = auth_cfg.get("password_hash", "")
+    ok = bool(
+        auth
+        and expected_hash
+        and auth.username == expected_user
+        and check_password_hash(expected_hash, auth.password)
+    )
+    if not ok:
+        if auth is not None:
+            # 只有真的带了(错误的)用户名密码才算一次失败尝试；
+            # 浏览器第一次弹登录框前的匿名请求不计数，避免正常访问被误伤。
+            _brute_force_guard.record_failure(ip)
+        return Response(
+            "需要登录才能访问 Nightcord Panopticon。",
+            401,
+            {"WWW-Authenticate": 'Basic realm="Nightcord Panopticon"'},
+        )
+    _brute_force_guard.record_success(ip)
 
 
 def fetch_all():
