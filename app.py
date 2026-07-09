@@ -4,7 +4,7 @@
     pip install -r requirements.txt
     cp config.example.yaml config.yaml   # 填入各面板地址与 API 密钥
     python app.py
-然后浏览器打开 http://127.0.0.1:5000
+然后浏览器打开 http://127.0.0.1:1810
 """
 import os
 import threading
@@ -17,6 +17,7 @@ from werkzeug.security import check_password_hash
 from bt_client import BTClient
 from notifier import Notifier, evaluate_alerts
 from auth import BruteForceGuard, get_client_ip
+from config_editor import redact_for_display, merge_submitted
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.yaml")
@@ -133,6 +134,43 @@ def index():
     return send_from_directory(app.static_folder, "index.html")
 
 
+@app.route("/setup")
+def setup_page():
+    # /setup 和 /settings 是同一个页面：面板列表为空时它就是"首次配置向导"，
+    # 已经配置过之后就是普通的设置页，逻辑都在前端 JS 里根据 GET /api/config 的返回判断。
+    return send_from_directory(app.static_folder, "settings.html")
+
+
+@app.route("/settings")
+def settings_page():
+    return send_from_directory(app.static_folder, "settings.html")
+
+
+@app.route("/api/config", methods=["GET"])
+def api_get_config():
+    try:
+        cfg = load_config()
+    except RuntimeError:
+        cfg = {}
+    return jsonify(redact_for_display(cfg))
+
+
+@app.route("/api/config", methods=["POST"])
+def api_save_config():
+    try:
+        old_cfg = load_config()
+    except RuntimeError:
+        old_cfg = {}
+    submitted = request.get_json(silent=True) or {}
+    merged, errors = merge_submitted(old_cfg, submitted)
+    if errors:
+        return jsonify({"errors": errors}), 400
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        yaml.safe_dump(merged, f, allow_unicode=True, sort_keys=False)
+    _cache["data"] = None  # 配置变了，强制下次 /api/status 重新拉取而不是用旧缓存
+    return jsonify({"ok": True})
+
+
 def background_alert_loop():
     """后台巡检线程：定期拉取所有面板数据、判断阈值、发送告警，并顺带刷新缓存。"""
     while True:
@@ -156,4 +194,4 @@ def background_alert_loop():
 if __name__ == "__main__":
     t = threading.Thread(target=background_alert_loop, daemon=True)
     t.start()
-    app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False)
+    app.run(host="0.0.0.0", port=1810, debug=True, use_reloader=False)

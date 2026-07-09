@@ -1,0 +1,164 @@
+"""
+设置页 / 首次运行向导（OOBE）用的 config.yaml 读写逻辑。
+
+设计原则：
+- 敏感字段（面板 api_key、飞书 webhook、邮箱密码、登录密码）从不回显明文给前端，
+  GET 接口只返回"是否已设置"，前端表单里对应输入框留空提交 = 不修改。
+- 只有真正填了新值才会覆盖旧值；新增的面板/开启的通知渠道必须把必填项填完整，
+  否则整个保存请求失败并返回具体报错，不会把配置存成半残状态。
+"""
+from werkzeug.security import generate_password_hash
+
+SECRET_PLACEHOLDER = "••••••••"
+
+
+def redact_for_display(cfg: dict) -> dict:
+    cfg = cfg or {}
+    panels_out = []
+    for p in cfg.get("panels", []) or []:
+        panels_out.append({
+            "name": p.get("name", ""),
+            "url": p.get("url", ""),
+            "api_key": SECRET_PLACEHOLDER if p.get("api_key") else "",
+            "verify_ssl": bool(p.get("verify_ssl", False)),
+        })
+
+    da = cfg.get("dashboard_auth", {}) or {}
+    dashboard_auth = {
+        "enabled": bool(da.get("enabled", False)),
+        "username": da.get("username", ""),
+        "has_password": bool(da.get("password_hash")),
+        "max_attempts": da.get("max_attempts", 5),
+        "lockout_seconds": da.get("lockout_seconds", 900),
+    }
+
+    notif = cfg.get("notifications", {}) or {}
+    feishu = notif.get("feishu", {}) or {}
+    email = notif.get("email", {}) or {}
+    notifications = {
+        "cooldown_seconds": notif.get("cooldown_seconds", 600),
+        "thresholds": {
+            "cpu": (notif.get("thresholds") or {}).get("cpu", 90),
+            "mem": (notif.get("thresholds") or {}).get("mem", 90),
+            "disk": (notif.get("thresholds") or {}).get("disk", 85),
+        },
+        "feishu": {
+            "enabled": bool(feishu.get("enabled", False)),
+            "webhook": SECRET_PLACEHOLDER if feishu.get("webhook") else "",
+        },
+        "email": {
+            "enabled": bool(email.get("enabled", False)),
+            "smtp_host": email.get("smtp_host", ""),
+            "smtp_port": email.get("smtp_port", 465),
+            "use_ssl": bool(email.get("use_ssl", True)),
+            "use_tls": bool(email.get("use_tls", False)),
+            "username": email.get("username", ""),
+            "password": SECRET_PLACEHOLDER if email.get("password") else "",
+            "from": email.get("from", ""),
+            "to": email.get("to", []) or [],
+        },
+    }
+
+    return {"panels": panels_out, "dashboard_auth": dashboard_auth, "notifications": notifications}
+
+
+def _clean_str(v):
+    return (v or "").strip()
+
+
+def merge_submitted(old_cfg: dict, submitted: dict):
+    """返回 (merged_cfg, errors)。errors 非空时调用方不应保存。"""
+    old_cfg = old_cfg or {}
+    submitted = submitted or {}
+    errors = []
+    old_panels_by_name = {p.get("name"): p for p in (old_cfg.get("panels", []) or [])}
+
+    merged_panels = []
+    for p in submitted.get("panels", []) or []:
+        name = _clean_str(p.get("name"))
+        url = _clean_str(p.get("url"))
+        api_key = _clean_str(p.get("api_key"))
+        if not name or not url:
+            errors.append(f"有一个面板缺少名称或地址（{name or url or '未命名'}）")
+            continue
+        if api_key in ("", SECRET_PLACEHOLDER):
+            old = old_panels_by_name.get(name)
+            if old and old.get("api_key"):
+                api_key = old["api_key"]
+            else:
+                errors.append(f"面板【{name}】还没有填写 API 密钥")
+                continue
+        merged_panels.append({
+            "name": name,
+            "url": url,
+            "api_key": api_key,
+            "verify_ssl": bool(p.get("verify_ssl", False)),
+        })
+
+    da_in = submitted.get("dashboard_auth", {}) or {}
+    old_da = old_cfg.get("dashboard_auth", {}) or {}
+    merged_da = {
+        "enabled": bool(da_in.get("enabled", False)),
+        "username": _clean_str(da_in.get("username")) or old_da.get("username", ""),
+        "max_attempts": int(da_in.get("max_attempts") or old_da.get("max_attempts", 5) or 5),
+        "lockout_seconds": int(da_in.get("lockout_seconds") or old_da.get("lockout_seconds", 900) or 900),
+    }
+    new_password = _clean_str(da_in.get("new_password"))
+    if new_password:
+        merged_da["password_hash"] = generate_password_hash(new_password)
+    elif old_da.get("password_hash"):
+        merged_da["password_hash"] = old_da["password_hash"]
+    elif merged_da["enabled"]:
+        errors.append("已开启登录验证，但还没有设置密码")
+
+    notif_in = submitted.get("notifications", {}) or {}
+    old_notif = old_cfg.get("notifications", {}) or {}
+    old_feishu = old_notif.get("feishu", {}) or {}
+    old_email = old_notif.get("email", {}) or {}
+    feishu_in = notif_in.get("feishu", {}) or {}
+    email_in = notif_in.get("email", {}) or {}
+
+    webhook = _clean_str(feishu_in.get("webhook"))
+    if webhook in ("", SECRET_PLACEHOLDER):
+        webhook = old_feishu.get("webhook", "")
+    if feishu_in.get("enabled") and not webhook:
+        errors.append("已开启飞书推送，但还没有填 Webhook 地址")
+
+    email_password = _clean_str(email_in.get("password"))
+    if email_password in ("", SECRET_PLACEHOLDER):
+        email_password = old_email.get("password", "")
+    if email_in.get("enabled") and not email_password:
+        errors.append("已开启邮件推送，但还没有填密码/授权码")
+
+    to_list = email_in.get("to")
+    if isinstance(to_list, str):
+        to_list = [x.strip() for x in to_list.split(",") if x.strip()]
+    if not to_list:
+        to_list = old_email.get("to", []) or []
+
+    merged_notif = {
+        "cooldown_seconds": int(notif_in.get("cooldown_seconds") or old_notif.get("cooldown_seconds", 600) or 600),
+        "thresholds": {
+            "cpu": int((notif_in.get("thresholds") or {}).get("cpu") or 90),
+            "mem": int((notif_in.get("thresholds") or {}).get("mem") or 90),
+            "disk": int((notif_in.get("thresholds") or {}).get("disk") or 85),
+        },
+        "feishu": {
+            "enabled": bool(feishu_in.get("enabled", False)),
+            "webhook": webhook,
+        },
+        "email": {
+            "enabled": bool(email_in.get("enabled", False)),
+            "smtp_host": _clean_str(email_in.get("smtp_host")) or old_email.get("smtp_host", ""),
+            "smtp_port": int(email_in.get("smtp_port") or old_email.get("smtp_port", 465) or 465),
+            "use_ssl": bool(email_in.get("use_ssl", old_email.get("use_ssl", True))),
+            "use_tls": bool(email_in.get("use_tls", old_email.get("use_tls", False))),
+            "username": _clean_str(email_in.get("username")) or old_email.get("username", ""),
+            "password": email_password,
+            "from": _clean_str(email_in.get("from")) or old_email.get("from", ""),
+            "to": to_list,
+        },
+    }
+
+    merged = {"panels": merged_panels, "dashboard_auth": merged_da, "notifications": merged_notif}
+    return merged, errors

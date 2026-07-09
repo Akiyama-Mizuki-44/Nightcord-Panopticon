@@ -51,12 +51,21 @@ pip install -r requirements.txt
 
 ### 3. Configure your panel list
 
+Two options:
+
+**Option A: the visual settings page (recommended)** — just start the service (next step) and open
+`http://127.0.0.1:1810/setup` in your browser. On first run it acts as a setup wizard: panel
+name/URL/API key, login password, alert thresholds, Feishu/email notifications — all saved
+immediately. It stays available afterwards at `/settings`; when editing, leave secret fields
+blank to keep them unchanged.
+
+**Option B: edit the YAML by hand**
 ```bash
 cp config.example.yaml config.yaml
 ```
-
-Edit `config.yaml` and fill in `name` / `url` (with port, e.g. `http://1.2.3.4:8888`) / `api_key`
-for every server.
+Edit `config.yaml` and fill in `name` / `url` (with port, e.g. `http://1.2.3.4:18101`) / `api_key`
+for every server; see the comments in the file for the rest (`dashboard_auth`'s password needs a
+hash from `gen_password_hash.py`).
 
 ### 4. Run
 
@@ -64,7 +73,7 @@ for every server.
 python app.py
 ```
 
-Open `http://127.0.0.1:5000` in your browser to see the aggregated dashboard.
+Open `http://127.0.0.1:1810` in your browser to see the aggregated dashboard.
 
 ## Security notes
 
@@ -83,19 +92,19 @@ API traffic between Panopticon and every panel also stays inside the WireGuard t
                                           │
                                     WireGuard tunnel (the dashboard is a peer on this mesh)
                                           │
-                              [BT Panel admin UI, no public access at all, WireGuard-only, port 1810]
+                              [BT Panel admin UI, no public access at all, WireGuard-only, port 18101]
 ```
 
-1. **Move the panel port and close it to the public entirely**: Panel dashboard → Settings → Panel Port → `1810`. Then on each BT Panel server, deny that port publicly and only allow it from the WireGuard subnet with `ufw`:
+1. **Move the panel port and close it to the public entirely**: Panel dashboard → Settings → Panel Port → `18101`. Then on each BT Panel server, deny that port publicly and only allow it from the WireGuard subnet with `ufw`:
    ```bash
-   ufw deny 1810/tcp
-   ufw allow in on wg0 to any port 1810 proto tcp
+   ufw deny 18101/tcp
+   ufw allow in on wg0 to any port 18101 proto tcp
    ```
    Site ports (if the box also serves public sites) are unaffected. You can also set the panel's **IP whitelist** to the WireGuard internal IP as a second layer.
 
 2. **Mesh**: the server running Panopticon joins the same WireGuard subnet (e.g. `10.10.0.0/24`) as every panel. It still serves HTTP(S) to the public internet, but all outbound calls to panel APIs go out over its own WireGuard interface, never touching the public internet.
 
-3. **Dashboard config**: set each panel's `url` in `config.yaml` to its WireGuard internal address on port 1810, e.g. `http://10.10.0.2:1810` (swap in your real internal IPs — no need to share them with me).
+3. **Dashboard config**: set each panel's `url` in `config.yaml` to its WireGuard internal address on port 18101, e.g. `http://10.10.0.2:18101` (swap in your real internal IPs — no need to share them with me).
 
 4. **Lock down Panopticon itself (important)**: since it's public and holds credentials that reach into your WireGuard network and call every panel's API, it needs a login. This is built in — see the next section.
 

@@ -54,10 +54,13 @@
     <h1>25時、ナイトコードで。 <span style="color:var(--muted);font-weight:400">/ Panopticon</span></h1>
     <div class="tagline">正体不明の音楽サークル、今夜も稼働状況を見守る。</div>
   </div>
-  <div class="meta" id="updated">加载中…</div>
+  <div style="text-align:right">
+    <div class="meta" id="updated">加载中…</div>
+    <a href="/settings" style="font-size:11px;color:var(--muted)">⚙ 设置</a>
+  </div>
 </header>
 <div id="grid"></div>
-<div id="empty" style="display:none">未配置任何面板，请编辑 config.yaml 后重启服务。</div>
+<div id="empty" style="display:none">还没配置任何面板，去 <a href="/settings" style="color:var(--accent)">设置页面</a> 添加一个吧。</div>
 <footer>25:00 — サーバーの向こう側、今日も奏でる。 · Nightcord Series</footer>
 
 <script>
@@ -191,7 +194,7 @@ async function refresh(){
     if(data.error){
       grid.innerHTML = '';
       empty.style.display = 'block';
-      empty.textContent = data.error;
+      empty.innerHTML = `${escapeHtml(data.error)}<br><br>去 <a href="/settings" style="color:var(--accent)">设置页面</a> 配置一下吧。`;
       return;
     }
     const panels = data.panels || [];

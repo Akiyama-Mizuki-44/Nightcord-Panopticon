@@ -31,6 +31,8 @@
 每张卡片下方都有「查看原始数据」的折叠区，可直接看到该接口的完整 JSON 返回，
 方便你按需扩展（例如加 SSL 证书到期、防火墙拦截统计、计划任务状态等）。
 
+完整的生产部署流程（含宝塔 API 设置、WireGuard 组网、systemd、Nginx+HTTPS）见 [DEPLOY.zh-CN.md](DEPLOY.zh-CN.md)。
+
 ## 使用步骤
 
 ### 1. 在每台宝塔面板开启 API 并获取密钥
@@ -48,11 +50,19 @@ pip install -r requirements.txt
 
 ### 3. 配置面板列表
 
+两种方式任选一种：
+
+**方式 A：可视化设置页（推荐）**——直接启动服务（见下一步），浏览器打开
+`http://127.0.0.1:1810/setup`，第一次访问时它就是配置向导：填面板名称/地址/API 密钥、
+登录密码、告警阈值、飞书/邮箱推送，保存后立即生效。之后这个页面常驻在 `/settings`，
+随时可以回来改，改的时候密钥类字段留空 = 不修改。
+
+**方式 B：手动编辑 YAML**
 ```bash
 cp config.example.yaml config.yaml
 ```
-
-编辑 `config.yaml`，为每台服务器填入 `name` / `url`（含端口，如 `http://1.2.3.4:8888`）/ `api_key`。
+编辑 `config.yaml`，为每台服务器填入 `name` / `url`（含端口，如 `http://1.2.3.4:18101`）/ `api_key`，
+其余字段（`dashboard_auth` 的密码要用 `gen_password_hash.py` 生成哈希）见文件里的注释。
 
 ### 4. 启动
 
@@ -60,7 +70,8 @@ cp config.example.yaml config.yaml
 python app.py
 ```
 
-浏览器打开 `http://127.0.0.1:5000` 即可看到聚合后的全局面板。
+浏览器打开 `http://127.0.0.1:1810` 即可看到聚合后的全局面板；如果还没配置过，会自动引导你去
+`/setup`。
 
 ## 安全提示
 
@@ -78,19 +89,19 @@ python app.py
                                           │
                                     WireGuard 隧道（Dashboard 是 WG 里的一个节点）
                                           │
-                              [宝塔面板后台，完全不对公网开放，只信 WireGuard，端口 1810]
+                              [宝塔面板后台，完全不对公网开放，只信 WireGuard，端口 18101]
 ```
 
-1. **面板改端口 + 完全关闭公网访问**：面板后台 → 设置 → 面板端口改成 `1810`。然后在每台宝塔服务器上用 `ufw` 彻底拒绝公网访问该端口，只放行 WireGuard 网段：
+1. **面板改端口 + 完全关闭公网访问**：面板后台 → 设置 → 面板端口改成 `18101`。然后在每台宝塔服务器上用 `ufw` 彻底拒绝公网访问该端口，只放行 WireGuard 网段：
    ```bash
-   ufw deny 1810/tcp
-   ufw allow in on wg0 to any port 1810 proto tcp
+   ufw deny 18101/tcp
+   ufw allow in on wg0 to any port 18101 proto tcp
    ```
    网站端口（如果有对外服务）不受影响，正常放行。面板的 **IP 白名单** 也可以顺手填成 WireGuard 内网 IP 作为双保险。
 
 2. **组网**：Panopticon 所在的服务器，作为 WireGuard 的一个节点加入你的私有网段（如 `10.10.0.0/24`），这样它虽然对公网开放 HTTP(S) 服务，但访问面板 API 时走的是它自己的 WireGuard 出口，不经过公网。
 
-3. **Dashboard 侧配置**：`config.yaml` 里每台面板的 `url` 填该面板的 WireGuard 内网地址 + 1810 端口，例如 `http://10.10.0.2:1810`（把 `10.10.0.x` 换成你自己的真实内网 IP，不用告诉我）。
+3. **Dashboard 侧配置**：`config.yaml` 里每台面板的 `url` 填该面板的 WireGuard 内网地址 + 18101 端口，例如 `http://10.10.0.2:18101`（把 `10.10.0.x` 换成你自己的真实内网 IP，不用告诉我）。
 
 4. **给 Panopticon 本身加登录门槛（关键）**：既然它要长期公网暴露，而且手里握着能连进你 WireGuard 内网、调用所有面板 API 的凭证，必须有登录验证，否则等于把内网入口的钥匙放在门口。本项目内置了这个能力，见下一节。
 

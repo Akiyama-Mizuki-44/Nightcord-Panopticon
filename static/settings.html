@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>设置 · 25時、ナイトコードで。 Panopticon</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{
+    --bg:#0f1115; --card:#171a21; --border:#262b36; --text:#e6e8ee;
+    --muted:#8a90a2; --ok:#3ecf8e; --warn:#f5a623; --bad:#f0506e; --accent:#5b8cff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+       background:var(--bg);color:var(--text)}
+  header{padding:20px 28px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+  header h1{font-size:18px;margin:0;font-weight:600}
+  header a{color:var(--muted);font-size:12px;text-decoration:none}
+  header a:hover{color:var(--text)}
+  main{max-width:760px;margin:0 auto;padding:24px 20px 80px}
+  .banner{background:rgba(91,140,255,.12);border:1px solid rgba(91,140,255,.35);color:var(--text);
+          border-radius:10px;padding:14px 16px;font-size:13px;margin-bottom:20px;line-height:1.6}
+  section{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px 20px;margin-bottom:18px}
+  section h2{font-size:14px;margin:0 0 4px;font-weight:600}
+  section .desc{color:var(--muted);font-size:12px;margin-bottom:14px}
+  label{display:block;font-size:12px;color:var(--muted);margin:10px 0 4px}
+  input[type=text],input[type=password],input[type=number]{
+    width:100%;background:#0c0e13;border:1px solid var(--border);border-radius:8px;color:var(--text);
+    padding:8px 10px;font-size:13px;
+  }
+  input[type=checkbox]{margin-right:6px;vertical-align:middle}
+  .checkbox-row{display:flex;align-items:center;font-size:13px;margin:10px 0}
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .row3{display:grid;grid-template-columns:1fr 1fr auto;gap:12px;align-items:end}
+  .panel-card{border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:12px;position:relative}
+  .panel-card .remove{position:absolute;top:10px;right:10px;background:none;border:none;color:var(--bad);
+                       cursor:pointer;font-size:12px}
+  button{cursor:pointer;border-radius:8px;border:1px solid var(--border);background:#1d212b;color:var(--text);
+         padding:8px 14px;font-size:13px}
+  button:hover{border-color:var(--accent)}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#0c0e13;font-weight:600}
+  button.add{width:100%;margin-top:4px}
+  .actions{position:sticky;bottom:0;background:linear-gradient(0deg,var(--bg) 60%,transparent);
+           padding:20px 0 8px;display:flex;gap:10px;align-items:center}
+  #msg{font-size:13px}
+  #msg.ok{color:var(--ok)} #msg.err{color:var(--bad)}
+  .hint{color:var(--muted);font-size:11px;margin-top:4px}
+  footer{padding:24px 28px;text-align:center;color:var(--muted);font-size:11px}
+</style>
+</head>
+<body>
+<header>
+  <h1>⚙ 设置</h1>
+  <a href="/">← 返回 Dashboard</a>
+</header>
+<main>
+  <div class="banner" id="oobeBanner" style="display:none">
+    还没检测到任何面板配置——这里就是首次配置向导。填完至少一台面板和登录密码后保存，
+    之后这个页面会一直在 <code>/settings</code>，随时可以回来改。
+    <br><br>
+    <strong>如果 Dashboard 打算公网暴露，请在开放公网访问之前先完成这里的配置</strong>
+    （尤其是登录密码），否则配置窗口对任何能访问到这个地址的人都是开放的。
+  </div>
+
+  <section>
+    <h2>面板列表</h2>
+    <div class="desc">每台宝塔面板的地址、API 密钥。地址建议填 WireGuard 内网地址（如 <code>http://10.10.0.2:18101</code>）。</div>
+    <div id="panels"></div>
+    <button class="add" onclick="addPanelRow()">+ 添加面板</button>
+  </section>
+
+  <section>
+    <h2>登录验证</h2>
+    <div class="desc">Dashboard 如果要长期公网暴露，务必开启。密码输入框留空 = 不修改已保存的密码。</div>
+    <div class="checkbox-row"><input type="checkbox" id="authEnabled"> 开启登录验证</div>
+    <div class="row2">
+      <div>
+        <label>用户名</label>
+        <input type="text" id="authUsername" placeholder="mizuki">
+      </div>
+      <div>
+        <label>新密码</label>
+        <input type="password" id="authPassword" placeholder="留空则不修改">
+        <div class="hint" id="authPasswordHint"></div>
+      </div>
+    </div>
+    <div class="row2">
+      <div>
+        <label>连续失败几次后锁定</label>
+        <input type="number" id="authMaxAttempts" value="5">
+      </div>
+      <div>
+        <label>锁定时长（秒）</label>
+        <input type="number" id="authLockout" value="900">
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>告警阈值</h2>
+    <div class="desc">CPU / 内存 / 磁盘使用率超过这个百分比就触发告警。</div>
+    <div class="row2" style="grid-template-columns:1fr 1fr 1fr">
+      <div><label>CPU %</label><input type="number" id="thCpu" value="90"></div>
+      <div><label>内存 %</label><input type="number" id="thMem" value="90"></div>
+      <div><label>磁盘 %</label><input type="number" id="thDisk" value="85"></div>
+    </div>
+    <label>同一条告警最小推送间隔（秒）</label>
+    <input type="number" id="cooldown" value="600">
+  </section>
+
+  <section>
+    <h2>飞书推送</h2>
+    <div class="desc">群设置 → 群机器人 → 添加"自定义机器人"，把 Webhook 地址填在这里。</div>
+    <div class="checkbox-row"><input type="checkbox" id="feishuEnabled"> 开启飞书推送</div>
+    <label>Webhook 地址</label>
+    <input type="password" id="feishuWebhook" placeholder="留空则不修改">
+    <div class="hint" id="feishuHint"></div>
+  </section>
+
+  <section>
+    <h2>邮件推送</h2>
+    <div class="checkbox-row"><input type="checkbox" id="emailEnabled"> 开启邮件推送</div>
+    <div class="row2">
+      <div><label>SMTP 服务器</label><input type="text" id="emailHost" placeholder="smtp.qq.com"></div>
+      <div><label>端口</label><input type="number" id="emailPort" value="465"></div>
+    </div>
+    <div class="checkbox-row"><input type="checkbox" id="emailSsl"> 使用 SSL（465 端口通常勾选）</div>
+    <div class="checkbox-row"><input type="checkbox" id="emailTls"> 使用 STARTTLS（587 端口通常勾选）</div>
+    <div class="row2">
+      <div><label>发信账号</label><input type="text" id="emailUsername" placeholder="you@qq.com"></div>
+      <div><label>SMTP 授权码</label><input type="password" id="emailPassword" placeholder="留空则不修改"></div>
+    </div>
+    <label>发件人</label>
+    <input type="text" id="emailFrom" placeholder="you@qq.com">
+    <label>收件人（多个用逗号分隔）</label>
+    <input type="text" id="emailTo" placeholder="a@b.com, c@d.com">
+    <div class="hint" id="emailHint"></div>
+  </section>
+
+  <div class="actions">
+    <button class="primary" onclick="save()">保存配置</button>
+    <span id="msg"></span>
+  </div>
+</main>
+<footer>25:00 — 设置也要好好收拾。 · Nightcord Series</footer>
+
+<script>
+const SECRET_PLACEHOLDER = '••••••••';
+let oldPanelNames = new Set();
+
+function panelRowHtml(p){
+  p = p || {name:'', url:'', api_key:'', verify_ssl:false};
+  const keyPlaceholder = p.api_key === SECRET_PLACEHOLDER ? '已设置，留空则不修改' : '面板设置-API接口 里的密钥';
+  return `<div class="panel-card">
+    <button class="remove" onclick="this.closest('.panel-card').remove()">删除</button>
+    <div class="row2">
+      <div><label>名称</label><input type="text" class="p-name" value="${escapeAttr(p.name)}" placeholder="例如：上海-Web01"></div>
+      <div><label>地址（含端口）</label><input type="text" class="p-url" value="${escapeAttr(p.url)}" placeholder="http://10.10.0.2:18101"></div>
+    </div>
+    <label>API 密钥</label>
+    <input type="password" class="p-key" placeholder="${keyPlaceholder}">
+    <div class="checkbox-row"><input type="checkbox" class="p-ssl" ${p.verify_ssl?'checked':''}> 校验 SSL 证书（面板用自签证书时不要勾）</div>
+  </div>`;
+}
+
+function addPanelRow(p){
+  document.getElementById('panels').insertAdjacentHTML('beforeend', panelRowHtml(p));
+}
+
+function escapeAttr(s){
+  return (s||'').replace(/"/g, '&quot;');
+}
+
+async function load(){
+  const res = await fetch('/api/config');
+  const cfg = await res.json();
+
+  document.getElementById('panels').innerHTML = '';
+  oldPanelNames = new Set((cfg.panels||[]).map(p=>p.name));
+  if(!cfg.panels || !cfg.panels.length){
+    document.getElementById('oobeBanner').style.display = 'block';
+    addPanelRow();
+  } else {
+    cfg.panels.forEach(p => addPanelRow(p));
+  }
+
+  const da = cfg.dashboard_auth || {};
+  document.getElementById('authEnabled').checked = !!da.enabled;
+  document.getElementById('authUsername').value = da.username || '';
+  document.getElementById('authMaxAttempts').value = da.max_attempts || 5;
+  document.getElementById('authLockout').value = da.lockout_seconds || 900;
+  document.getElementById('authPasswordHint').textContent = da.has_password ? '已设置密码（留空保持不变）' : '还没设置密码';
+
+  const notif = cfg.notifications || {};
+  const th = notif.thresholds || {};
+  document.getElementById('thCpu').value = th.cpu ?? 90;
+  document.getElementById('thMem').value = th.mem ?? 90;
+  document.getElementById('thDisk').value = th.disk ?? 85;
+  document.getElementById('cooldown').value = notif.cooldown_seconds ?? 600;
+
+  const fs = notif.feishu || {};
+  document.getElementById('feishuEnabled').checked = !!fs.enabled;
+  document.getElementById('feishuHint').textContent = fs.webhook === SECRET_PLACEHOLDER ? '已设置 Webhook（留空保持不变）' : '还没设置';
+
+  const em = notif.email || {};
+  document.getElementById('emailEnabled').checked = !!em.enabled;
+  document.getElementById('emailHost').value = em.smtp_host || '';
+  document.getElementById('emailPort').value = em.smtp_port || 465;
+  document.getElementById('emailSsl').checked = !!em.use_ssl;
+  document.getElementById('emailTls').checked = !!em.use_tls;
+  document.getElementById('emailUsername').value = em.username || '';
+  document.getElementById('emailFrom').value = em.from || '';
+  document.getElementById('emailTo').value = (em.to||[]).join(', ');
+  document.getElementById('emailHint').textContent = em.password === SECRET_PLACEHOLDER ? '已设置授权码（留空保持不变）' : '还没设置';
+}
+
+function collectPanels(){
+  return Array.from(document.querySelectorAll('.panel-card')).map(card => ({
+    name: card.querySelector('.p-name').value.trim(),
+    url: card.querySelector('.p-url').value.trim(),
+    api_key: card.querySelector('.p-key').value.trim(),
+    verify_ssl: card.querySelector('.p-ssl').checked,
+  })).filter(p => p.name || p.url);
+}
+
+async function save(){
+  const msg = document.getElementById('msg');
+  msg.className = '';
+  msg.textContent = '保存中…';
+
+  const payload = {
+    panels: collectPanels(),
+    dashboard_auth: {
+      enabled: document.getElementById('authEnabled').checked,
+      username: document.getElementById('authUsername').value.trim(),
+      new_password: document.getElementById('authPassword').value,
+      max_attempts: parseInt(document.getElementById('authMaxAttempts').value) || 5,
+      lockout_seconds: parseInt(document.getElementById('authLockout').value) || 900,
+    },
+    notifications: {
+      cooldown_seconds: parseInt(document.getElementById('cooldown').value) || 600,
+      thresholds: {
+        cpu: parseInt(document.getElementById('thCpu').value) || 90,
+        mem: parseInt(document.getElementById('thMem').value) || 90,
+        disk: parseInt(document.getElementById('thDisk').value) || 85,
+      },
+      feishu: {
+        enabled: document.getElementById('feishuEnabled').checked,
+        webhook: document.getElementById('feishuWebhook').value.trim(),
+      },
+      email: {
+        enabled: document.getElementById('emailEnabled').checked,
+        smtp_host: document.getElementById('emailHost').value.trim(),
+        smtp_port: parseInt(document.getElementById('emailPort').value) || 465,
+        use_ssl: document.getElementById('emailSsl').checked,
+        use_tls: document.getElementById('emailTls').checked,
+        username: document.getElementById('emailUsername').value.trim(),
+        password: document.getElementById('emailPassword').value,
+        from: document.getElementById('emailFrom').value.trim(),
+        to: document.getElementById('emailTo').value,
+      },
+    },
+  };
+
+  try{
+    const res = await fetch('/api/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if(!res.ok){
+      msg.className = 'err';
+      msg.textContent = (data.errors || [data.error || '保存失败']).join('；');
+      return;
+    }
+    msg.className = 'ok';
+    msg.textContent = '已保存 ✓';
+    document.getElementById('oobeBanner').style.display = 'none';
+    await load();
+  }catch(e){
+    msg.className = 'err';
+    msg.textContent = '保存失败：' + e;
+  }
+}
+
+load();
+</script>
+</body>
+</html>
