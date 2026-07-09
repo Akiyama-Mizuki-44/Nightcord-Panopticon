@@ -7,12 +7,14 @@
 然后浏览器打开 http://127.0.0.1:5000
 """
 import os
+import threading
 import time
 import yaml
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, jsonify, send_from_directory
 
 from bt_client import BTClient
+from notifier import Notifier, evaluate_alerts
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.yaml")
@@ -23,15 +25,20 @@ app = Flask(__name__, static_folder=os.path.join(BASE_DIR, "static"))
 _cache = {"data": None, "ts": 0}
 CACHE_TTL = 10  # 秒
 
+ALERT_CHECK_INTERVAL = 60  # 秒，后台告警巡检间隔（与前端是否打开无关）
 
-def load_panels():
+
+def load_config():
     if not os.path.exists(CONFIG_PATH):
         raise RuntimeError(
             f"未找到配置文件 {CONFIG_PATH}，请先复制 config.example.yaml 为 config.yaml 并填写面板信息"
         )
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f) or {}
-    return cfg.get("panels", [])
+        return yaml.safe_load(f) or {}
+
+
+def load_panels():
+    return load_config().get("panels", [])
 
 
 def fetch_all():
@@ -75,5 +82,27 @@ def index():
     return send_from_directory(app.static_folder, "index.html")
 
 
+def background_alert_loop():
+    """后台巡检线程：定期拉取所有面板数据、判断阈值、发送告警，并顺带刷新缓存。"""
+    while True:
+        try:
+            cfg = load_config()
+            data = fetch_all()
+            _cache["data"] = data
+            _cache["ts"] = time.time()
+
+            notif_cfg = cfg.get("notifications", {})
+            thresholds = notif_cfg.get("thresholds", {})
+            notifier = Notifier(notif_cfg)
+            for panel_result in data:
+                for key, title, content in evaluate_alerts(panel_result, thresholds):
+                    notifier.notify(key, title, content)
+        except Exception as e:
+            print(f"[background_alert_loop] 出错: {e}")
+        time.sleep(ALERT_CHECK_INTERVAL)
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    t = threading.Thread(target=background_alert_loop, daemon=True)
+    t.start()
+    app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False)

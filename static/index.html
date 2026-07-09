@@ -2,12 +2,17 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>宝塔多面板 Dashboard</title>
+<title>25時、ナイトコードで。 Panopticon</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root{
     --bg:#0f1115; --card:#171a21; --border:#262b36; --text:#e6e8ee;
     --muted:#8a90a2; --ok:#3ecf8e; --warn:#f5a623; --bad:#f0506e; --accent:#5b8cff;
+    /* 25時、ナイトコードで。四人の合わせ色（衣装リボンカラー基準） */
+    --kanade:#e0526b;  /* 宵崎奏 - 赤 */
+    --mafuyu:#5b8cff;  /* 朝比奈まふゆ - 青 */
+    --ena:#f0c93b;     /* 東雲絵名 - 黄 */
+    --mizuki:#f2a0c4;  /* 暁山瑞希 - ピンク */
   }
   *{box-sizing:border-box}
   body{margin:0;font-family:-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
@@ -16,7 +21,8 @@
   header h1{font-size:18px;margin:0;font-weight:600}
   header .meta{color:var(--muted);font-size:12px}
   #grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px;padding:20px 28px}
-  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px 18px;
+        border-top:3px solid var(--accent-color, var(--accent));position:relative}
   .card h2{margin:0 0 4px;font-size:15px;display:flex;align-items:center;gap:8px}
   .dot{width:9px;height:9px;border-radius:50%;display:inline-block}
   .dot.ok{background:var(--ok)} .dot.bad{background:var(--bad)}
@@ -38,15 +44,21 @@
   summary{cursor:pointer;color:var(--muted);font-size:11px}
   pre{max-height:200px;overflow:auto;font-size:11px;background:#0c0e13;padding:8px;border-radius:6px}
   #empty{padding:60px;text-align:center;color:var(--muted)}
+  header .tagline{font-size:11px;color:var(--muted);margin-top:2px;font-style:italic}
+  footer{padding:24px 28px;text-align:center;color:var(--muted);font-size:11px;border-top:1px solid var(--border);margin-top:12px}
 </style>
 </head>
 <body>
 <header>
-  <h1>🐯 宝塔多面板 Dashboard</h1>
+  <div>
+    <h1>25時、ナイトコードで。 <span style="color:var(--muted);font-weight:400">/ Panopticon</span></h1>
+    <div class="tagline">正体不明の音楽サークル、今夜も稼働状況を見守る。</div>
+  </div>
   <div class="meta" id="updated">加载中…</div>
 </header>
 <div id="grid"></div>
 <div id="empty" style="display:none">未配置任何面板，请编辑 config.yaml 后重启服务。</div>
+<footer>25:00 — サーバーの向こう側、今日も奏でる。 · Nightcord Series</footer>
 
 <script>
 const REFRESH_MS = 15000;
@@ -136,9 +148,18 @@ function renderDatabases(dbs){
   return `<div class="row"><span class="k">数据库总数</span><span>${list.length}</span></div>`;
 }
 
-function renderCard(p){
+// 25時、ナイトコードで。四人按面板顺序循环分配强调色，纯装饰用，无实际含义
+const NIGHTCORD_MEMBERS = [
+  {name: '奏', color: 'var(--kanade)'},
+  {name: 'まふゆ', color: 'var(--mafuyu)'},
+  {name: '絵名', color: 'var(--ena)'},
+  {name: '瑞希', color: 'var(--mizuki)'},
+];
+
+function renderCard(p, idx){
   const online = p.online !== false;
   const dot = online ? 'ok' : 'bad';
+  const member = NIGHTCORD_MEMBERS[idx % NIGHTCORD_MEMBERS.length];
   let body = '';
   if(!online){
     body += `<div class="err">${p.error || '无法连接该面板'}</div>`;
@@ -148,8 +169,10 @@ function renderCard(p){
   body += `<div class="section-title">网站</div>${renderSites(p.sites)}`;
   body += `<div class="section-title">数据库</div>${renderDatabases(p.databases)}`;
   body += `<details><summary>查看原始数据</summary><pre>${escapeHtml(JSON.stringify(p, null, 2))}</pre></details>`;
-  return `<div class="card">
-    <h2><span class="dot ${dot}"></span>${p.name || '未命名面板'}</h2>
+  return `<div class="card" style="--accent-color:${member.color}">
+    <h2><span class="dot ${dot}"></span>${p.name || '未命名面板'}
+      <span style="margin-left:auto;font-size:10px;color:${member.color};font-weight:400">♪ ${member.name}</span>
+    </h2>
     <div class="url">${p.url || ''}</div>
     ${body}
   </div>`;
@@ -178,7 +201,7 @@ async function refresh(){
       return;
     }
     empty.style.display = 'none';
-    grid.innerHTML = panels.map(renderCard).join('');
+    grid.innerHTML = panels.map((p, i) => renderCard(p, i)).join('');
     document.getElementById('updated').textContent =
       '最后更新: ' + new Date((data.ts||Date.now()/1000)*1000).toLocaleTimeString() + (data.cached ? '（缓存）' : '');
   }catch(e){

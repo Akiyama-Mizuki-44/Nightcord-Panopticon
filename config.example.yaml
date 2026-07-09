@@ -11,3 +11,29 @@ panels:
     verify_ssl: false
 
   # 可继续添加更多面板...
+
+# 告警通知（面板离线 / CPU / 内存 / 磁盘超阈值时推送）
+notifications:
+  cooldown_seconds: 600   # 同一条告警的最小推送间隔，避免刷屏
+
+  thresholds:
+    cpu: 90    # CPU 使用率 %
+    mem: 90    # 内存使用率 %
+    disk: 85   # 磁盘使用率 %
+
+  feishu:
+    enabled: false
+    # 飞书群 -> 设置 -> 群机器人 -> 添加"自定义机器人"，复制 Webhook 地址
+    webhook: "https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+
+  email:
+    enabled: false
+    smtp_host: "smtp.qq.com"
+    smtp_port: 465
+    use_ssl: true          # 465 端口通常用 SSL；如用 587 端口把 use_ssl 改 false、use_tls 改 true
+    use_tls: false
+    username: "your_email@qq.com"
+    password: "SMTP授权码（不是邮箱登录密码）"
+    from: "your_email@qq.com"
+    to:
+      - "w_mutsumi@hotmail.com"
