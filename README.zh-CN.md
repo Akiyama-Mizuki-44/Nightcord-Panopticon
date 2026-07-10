@@ -31,7 +31,7 @@
 每张卡片下方都有「查看原始数据」的折叠区，可直接看到该接口的完整 JSON 返回，
 方便你按需扩展（例如加 SSL 证书到期、防火墙拦截统计、计划任务状态等）。
 
-完整的生产部署流程（含宝塔 API 设置、WireGuard 组网、systemd、Nginx+HTTPS）见 [DEPLOY.zh-CN.md](DEPLOY.zh-CN.md)。
+通用配置指南（不绑定具体服务器）见 [SETUP.zh-CN.md](SETUP.zh-CN.md)；一份具体案例（含宝塔 API 设置、WireGuard 组网、systemd、Nginx+HTTPS）见 [DEPLOY.zh-CN.md](DEPLOY.zh-CN.md)。
 
 ## 使用步骤
 

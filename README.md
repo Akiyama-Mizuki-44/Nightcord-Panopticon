@@ -34,6 +34,8 @@ can vary slightly by panel version. Every card has a collapsible "raw data" sect
 the full JSON response, so you can extend it as needed (SSL expiry, firewall block counts,
 cron job status, etc.).
 
+General setup guide (not tied to a specific server) at [SETUP.md](SETUP.md); a worked example (BT Panel API setup, WireGuard mesh, systemd, Nginx+HTTPS) at [DEPLOY.zh-CN.md](DEPLOY.zh-CN.md) (Chinese only, commands are still copy-pasteable).
+
 ## Usage
 
 ### 1. Enable the API on each BT Panel and grab a key

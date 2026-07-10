@@ -5,3 +5,8 @@ __pycache__/
 venv/
 *.log
 .DS_Store
+
+# 部署/本地工具，包含真实服务器信息或本地状态，不进公开仓库
+.claude/
+deploy.env
+deploy.log

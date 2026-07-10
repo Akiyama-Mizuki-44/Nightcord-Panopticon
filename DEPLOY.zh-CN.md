@@ -43,8 +43,10 @@ ufw allow 443/tcp
 
 ### 1.4 IP 白名单（双保险）
 
-面板后台 → 设置 → API 接口 → IP 白名单，填这台服务器在 WireGuard 网段里的内网 IP
-（如 `10.10.0.2`），而不是公网 IP。
+面板后台 → 设置 → API 接口 → IP 白名单，这里填的是**谁允许来调用这台面板的 API**，
+所以应该填 **Panopticon/hub 所在服务器的 WireGuard 内网 IP**（按目前的组网就是上海那台的 `10.10.0.1`），
+不是这台面板自己的 IP，也不是公网 IP。因为 ufw 已经把 `18101` 端口锁死只放行 wg0 网段，
+这一步理论上只有 `10.10.0.1` 能连进来，白名单填对了就是双保险，填反了 API 请求会直接被拒绝。
 
 ---
 
@@ -93,7 +95,7 @@ systemctl enable wg-quick@wg0
 ### 3.1 拉取代码
 
 ```bash
-git clone <你的仓库地址> nightcord-panopticon
+git clone https://github.com/Akiyama-Mizuki-44/Nightcord-Panopticon.git nightcord-panopticon
 cd nightcord-panopticon
 ```
 
