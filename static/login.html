@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>登录 · 25時、ナイトコードで。 Panopticon</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{
+    --bg:#0f1115; --card:#171a21; --border:#262b36; --text:#e6e8ee;
+    --muted:#8a90a2; --ok:#3ecf8e; --bad:#f0506e; --accent:#5b8cff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+       font-family:-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+       background:var(--bg);color:var(--text)}
+  .box{width:100%;max-width:360px;padding:28px 26px;background:var(--card);border:1px solid var(--border);
+       border-radius:14px}
+  h1{font-size:18px;margin:0 0 4px;font-weight:600;text-align:center}
+  .sub{color:var(--muted);font-size:12px;text-align:center;margin-bottom:22px}
+  label{display:block;font-size:12px;color:var(--muted);margin:12px 0 4px}
+  input[type=text],input[type=password]{
+    width:100%;background:#0c0e13;border:1px solid var(--border);border-radius:8px;color:var(--text);
+    padding:9px 10px;font-size:13px;
+  }
+  button{cursor:pointer;width:100%;border-radius:8px;border:1px solid var(--border);background:#1d212b;
+         color:var(--text);padding:10px 14px;font-size:13px;margin-top:14px}
+  button:hover{border-color:var(--accent)}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#0c0e13;font-weight:600}
+  .divider{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:11px;margin:18px 0}
+  .divider::before,.divider::after{content:'';flex:1;height:1px;background:var(--border)}
+  #msg{font-size:12px;margin-top:12px;min-height:16px}
+  #msg.err{color:var(--bad)} #msg.ok{color:var(--ok)}
+</style>
+</head>
+<body>
+<div class="box">
+  <h1>25:00</h1>
+  <div class="sub">Nightcord Panopticon · 请登录</div>
+
+  <button class="primary" id="passkeyBtn" onclick="loginWithPasskey()">🔑 使用 Passkey 登录</button>
+
+  <div class="divider">或</div>
+
+  <form id="pwForm" onsubmit="loginWithPassword(event)">
+    <label>用户名</label>
+    <input type="text" id="username" autocomplete="username">
+    <label>密码</label>
+    <input type="password" id="password" autocomplete="current-password">
+    <button type="submit">登录</button>
+  </form>
+
+  <div id="msg"></div>
+</div>
+
+<script>
+function showMsg(text, ok){
+  const msg = document.getElementById('msg');
+  msg.textContent = text;
+  msg.className = ok ? 'ok' : 'err';
+}
+
+function base64urlToBuffer(base64url){
+  const base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
+  const pad = base64.length % 4 ? '='.repeat(4 - base64.length % 4) : '';
+  const raw = atob(base64 + pad);
+  const buf = new Uint8Array(raw.length);
+  for(let i=0;i<raw.length;i++) buf[i] = raw.charCodeAt(i);
+  return buf.buffer;
+}
+
+function bufferToBase64url(buf){
+  const bytes = new Uint8Array(buf);
+  let str = '';
+  for(const b of bytes) str += String.fromCharCode(b);
+  return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function loginWithPassword(e){
+  e.preventDefault();
+  showMsg('登录中…', true);
+  try{
+    const res = await fetch('/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        username: document.getElementById('username').value,
+        password: document.getElementById('password').value,
+      }),
+    });
+    const data = await res.json();
+    if(!res.ok){ showMsg(data.error || '登录失败', false); return; }
+    location.href = '/';
+  }catch(err){
+    showMsg('登录失败：' + err, false);
+  }
+}
+
+async function loginWithPasskey(){
+  if(!window.PublicKeyCredential){
+    showMsg('当前浏览器不支持 Passkey', false);
+    return;
+  }
+  showMsg('等待 Passkey 验证…', true);
+  try{
+    const optRes = await fetch('/api/webauthn/login/options', {method: 'POST'});
+    const options = await optRes.json();
+    if(!optRes.ok){ showMsg(options.error || '获取登录选项失败', false); return; }
+
+    options.challenge = base64urlToBuffer(options.challenge);
+    if(options.allowCredentials){
+      options.allowCredentials = options.allowCredentials.map(c => ({...c, id: base64urlToBuffer(c.id)}));
+    }
+
+    const assertion = await navigator.credentials.get({publicKey: options});
+
+    const credential = {
+      id: assertion.id,
+      rawId: bufferToBase64url(assertion.rawId),
+      type: assertion.type,
+      response: {
+        clientDataJSON: bufferToBase64url(assertion.response.clientDataJSON),
+        authenticatorData: bufferToBase64url(assertion.response.authenticatorData),
+        signature: bufferToBase64url(assertion.response.signature),
+        userHandle: assertion.response.userHandle ? bufferToBase64url(assertion.response.userHandle) : null,
+      },
+      clientExtensionResults: assertion.getClientExtensionResults(),
+    };
+
+    const verifyRes = await fetch('/api/webauthn/login/verify', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({credential}),
+    });
+    const result = await verifyRes.json();
+    if(!verifyRes.ok){ showMsg(result.error || 'Passkey 验证失败', false); return; }
+    location.href = '/';
+  }catch(err){
+    showMsg('Passkey 登录失败：' + err, false);
+  }
+}
+</script>
+</body>
+</html>

@@ -20,6 +20,9 @@ panels:
 # Dashboard 自身的登录保护（Panopticon 打算长期暴露公网时务必开启）
 # 用法：
 #   python gen_password_hash.py "你的密码"   # 生成 password_hash，粘到下面
+# 也支持 Passkey（免密码，指纹/人脸/安全密钥）登录，密码登录始终保留作为备用方式；
+# Passkey 在 /settings 页面里添加，不用手填这里，添加后会自动出现 passkeys 字段。
+# 注意：Passkey 需要通过 HTTPS 访问（127.0.0.1/localhost 除外），纯 WireGuard 内网 HTTP 访问用不了。
 dashboard_auth:
   enabled: false                # 只在 WireGuard 内网访问、不打算公网暴露时可以设 false
   username: "mizuki"

@@ -57,6 +57,7 @@
   <div style="text-align:right">
     <div class="meta" id="updated">加载中…</div>
     <a href="/settings" style="font-size:11px;color:var(--muted)">⚙ 设置</a>
+    <a href="#" onclick="logout();return false" style="font-size:11px;color:var(--muted);margin-left:10px">⎋ 退出登录</a>
   </div>
 </header>
 <div id="grid"></div>
@@ -183,6 +184,11 @@ function renderCard(p, idx){
 
 function escapeHtml(s){
   return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+}
+
+async function logout(){
+  await fetch('/logout', {method: 'POST'});
+  location.href = '/login';
 }
 
 async function refresh(){
