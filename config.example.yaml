@@ -17,6 +17,14 @@ panels:
 
   # 可继续添加更多面板...
 
+# Nightcord-Status（自建监控服务，xml_status_service.py，端口 8702）接入，跟宝塔面板并列展示成一张独立卡片。
+# 目前该接口无鉴权，只信任 WireGuard 网段，url 填它在 WireGuard 网格里的内网地址。
+nightcord_status:
+  enabled: false
+  name: "Nightcord-Status"
+  url: "http://10.10.0.4:8702"      # FreePBX（跑 xml_status_service.py 的机器）的 WireGuard 内网地址
+  verify_ssl: false
+
 # Dashboard 自身的登录保护（Panopticon 打算长期暴露公网时务必开启）
 # 用法：
 #   python gen_password_hash.py "你的密码"   # 生成 password_hash，粘到下面

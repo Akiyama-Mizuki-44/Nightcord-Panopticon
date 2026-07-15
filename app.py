@@ -15,6 +15,7 @@ from flask import Flask, jsonify, request, send_from_directory, Response
 from werkzeug.security import check_password_hash
 
 from bt_client import BTClient
+from nightcord_status_client import NightcordStatusClient
 from notifier import Notifier, evaluate_alerts
 from auth import BruteForceGuard, get_client_ip
 from config_editor import redact_for_display, merge_submitted
@@ -112,6 +113,20 @@ def fetch_all():
     # 保持配置顺序
     order = {p["name"]: i for i, p in enumerate(panels)}
     results.sort(key=lambda r: order.get(r.get("name"), 999))
+
+    ns_cfg = load_config().get("nightcord_status", {})
+    if ns_cfg.get("enabled"):
+        try:
+            ns_result = NightcordStatusClient(
+                ns_cfg.get("name", "Nightcord-Status"),
+                ns_cfg["url"],
+                ns_cfg.get("verify_ssl", False),
+            ).collect_all()
+        except Exception as e:
+            ns_result = {"name": ns_cfg.get("name", "Nightcord-Status"), "url": ns_cfg.get("url"),
+                         "online": False, "error": str(e), "kind": "nightcord-status", "targets": []}
+        results.append(ns_result)
+
     return results
 
 
