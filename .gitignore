@@ -6,7 +6,9 @@ venv/
 *.log
 .DS_Store
 
-# 部署/本地工具，包含真实服务器信息或本地状态，不进公开仓库
-.claude/
+# 部署/本地工具，包含真实服务器信息或本地状态，不进公开仓库；
+# 但 .claude/settings.json（SessionStart hook 配置，不含任何密钥本身）要提交，云端 session 靠它自动生效
+.claude/*
+!.claude/settings.json
 deploy.env
 deploy.log
