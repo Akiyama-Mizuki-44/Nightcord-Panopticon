@@ -209,4 +209,5 @@ def background_alert_loop():
 if __name__ == "__main__":
     t = threading.Thread(target=background_alert_loop, daemon=True)
     t.start()
-    app.run(host="0.0.0.0", port=1810, debug=True, use_reloader=False)
+    debug = os.environ.get("FLASK_DEBUG") == "1"
+    app.run(host="0.0.0.0", port=1810, debug=debug, use_reloader=False)
