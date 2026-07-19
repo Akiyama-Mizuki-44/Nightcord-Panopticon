@@ -35,6 +35,13 @@ dashboard_auth:
   max_attempts: 5                # 同一 IP 连续失败这么多次后锁定
   lockout_seconds: 900           # 锁定时长（秒），默认 15 分钟
 
+# 自建监控 agent（agent/metrics_agent.py，跑在各面板服务器上）上报系统指标历史的接收端配置。
+# agent 侧的 agent_config.yaml 里 shared_secret 要跟这里填的一致。
+metrics_agent:
+  enabled: false
+  shared_secret: "生成一个随机字符串，agent 和 Panopticon 两边要一致"
+  retention_days: 30   # 超过这么多天的历史数据会被自动清理
+
 # 告警通知（面板离线 / CPU / 内存 / 磁盘超阈值时推送）
 notifications:
   cooldown_seconds: 600   # 同一条告警的最小推送间隔，避免刷屏

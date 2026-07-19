@@ -160,5 +160,9 @@ def merge_submitted(old_cfg: dict, submitted: dict):
         },
     }
 
-    merged = {"panels": merged_panels, "dashboard_auth": merged_da, "notifications": merged_notif}
+    # 从 old_cfg 出发再覆盖显式处理过的顶层键，而不是整个重建：
+    # 这样 nightcord_status / metrics_agent 这些没有设置页 UI 的顶层配置段
+    # 不会在保存 /settings 表单时被静默抹掉。
+    merged = dict(old_cfg)
+    merged.update({"panels": merged_panels, "dashboard_auth": merged_da, "notifications": merged_notif})
     return merged, errors

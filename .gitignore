@@ -1,4 +1,6 @@
 config.yaml
+metrics.db
+agent/agent_config.yaml
 __pycache__/
 *.pyc
 .venv/

@@ -6,6 +6,7 @@
     python app.py
 然后浏览器打开 http://127.0.0.1:1810
 """
+import hmac
 import os
 import threading
 import time
@@ -19,11 +20,13 @@ from nightcord_status_client import NightcordStatusClient
 from notifier import Notifier, evaluate_alerts
 from auth import BruteForceGuard, get_client_ip
 from config_editor import redact_for_display, merge_submitted
+import metrics_store
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.yaml")
 
 app = Flask(__name__, static_folder=os.path.join(BASE_DIR, "static"))
+metrics_store.init_db()
 
 _brute_force_guard = BruteForceGuard()  # 默认 5 次失败锁 15 分钟，实际阈值以 config.yaml 为准（见 enforce_auth）
 
@@ -32,6 +35,9 @@ _cache = {"data": None, "ts": 0}
 CACHE_TTL = 10  # 秒
 
 ALERT_CHECK_INTERVAL = 60  # 秒，后台告警巡检间隔（与前端是否打开无关）
+METRICS_PRUNE_INTERVAL = 3600  # 秒，自建监控 agent 历史数据的清理巡检间隔
+METRICS_REPORT_PATH = "/api/metrics/report"
+QINGYUAN_VERSION = "8.16-beta"  # 青源（自建系统指标监控架构）版本号，见 QINGYUAN.zh-CN.md
 
 
 def load_config():
@@ -54,6 +60,8 @@ def enforce_auth():
     并按来源 IP 做暴力破解锁定。dashboard_auth.enabled 为 false（默认）时不做任何限制，
     适合只在 WireGuard 内网访问、不打算公网暴露的部署方式。
     """
+    if request.path == METRICS_REPORT_PATH:
+        return  # agent 机器对机器上报，鉴权走独立的共享密钥（见 api_metrics_report），不走 Basic Auth
     try:
         cfg = load_config()
     except RuntimeError:
@@ -144,6 +152,54 @@ def api_status():
     return jsonify({"panels": data, "cached": False, "ts": now})
 
 
+@app.route(METRICS_REPORT_PATH, methods=["POST"])
+def api_metrics_report():
+    """自建监控 agent（agent/metrics_agent.py）的上报入口，机器对机器调用。
+    鉴权用共享密钥而不是 dashboard_auth 的 Basic Auth（见 enforce_auth 里的例外）。
+    """
+    cfg = load_config().get("metrics_agent", {})
+    if not cfg.get("enabled"):
+        return jsonify({"error": "metrics_agent 未启用"}), 404
+
+    expected = cfg.get("shared_secret", "")
+    got = request.headers.get("X-Metrics-Secret", "")
+    if not expected or not hmac.compare_digest(expected, got):
+        return jsonify({"error": "共享密钥不匹配"}), 401
+
+    body = request.get_json(silent=True) or {}
+    panel = body.get("panel")
+    try:
+        ts = int(body["ts"])
+        cpu = float(body["cpu"])
+        mem = float(body["mem"])
+        disk = float(body["disk"])
+        net_in_kbps = float(body["net_in_kbps"])
+        net_out_kbps = float(body["net_out_kbps"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "缺少字段或字段类型不对，需要 panel/ts/cpu/mem/disk/net_in_kbps/net_out_kbps"}), 400
+    if not panel:
+        return jsonify({"error": "缺少 panel"}), 400
+
+    metrics_store.insert_sample(panel, ts, cpu, mem, disk, net_in_kbps, net_out_kbps)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/metrics/version")
+def api_metrics_version():
+    return jsonify({"name": "青源", "version": QINGYUAN_VERSION})
+
+
+@app.route("/api/metrics/history")
+def api_metrics_history():
+    """给前端历史趋势图用的读接口，跟其它面板数据一样走 dashboard_auth。"""
+    panel = request.args.get("panel", "")
+    if not panel:
+        return jsonify({"error": "缺少 panel 参数"}), 400
+    hours = request.args.get("hours", 24, type=float) or 24
+    since_ts = int(time.time() - hours * 3600)
+    return jsonify({"panel": panel, "samples": metrics_store.query_history(panel, since_ts)})
+
+
 @app.route("/")
 def index():
     return send_from_directory(app.static_folder, "index.html")
@@ -206,8 +262,24 @@ def background_alert_loop():
         time.sleep(ALERT_CHECK_INTERVAL)
 
 
+def background_metrics_prune_loop():
+    """后台线程：定期清理超过保留窗口的自建监控历史数据，防止 metrics.db 无限增长。"""
+    while True:
+        try:
+            cfg = load_config().get("metrics_agent", {})
+            retention_days = cfg.get("retention_days", 30)
+            cutoff_ts = int(time.time() - retention_days * 86400)
+            metrics_store.prune_older_than(cutoff_ts)
+        except Exception as e:
+            print(f"[background_metrics_prune_loop] 出错: {e}")
+        time.sleep(METRICS_PRUNE_INTERVAL)
+
+
 if __name__ == "__main__":
     t = threading.Thread(target=background_alert_loop, daemon=True)
     t.start()
+    t2 = threading.Thread(target=background_metrics_prune_loop, daemon=True)
+    t2.start()
     debug = os.environ.get("FLASK_DEBUG") == "1"
-    app.run(host="0.0.0.0", port=1810, debug=debug, use_reloader=False)
+    port = int(os.environ.get("PORT", 1810))
+    app.run(host="0.0.0.0", port=port, debug=debug, use_reloader=False)

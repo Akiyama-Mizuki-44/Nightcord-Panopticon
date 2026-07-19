@@ -1,0 +1,5 @@
+# 复制为 agent_config.yaml 后填写真实信息，agent_config.yaml 不要提交到公开仓库
+panel_name: "日本"  # 要跟 Panopticon 那边认得的名字对应，用来区分是哪台机器上报的
+report_url: "http://10.10.0.5:1810/api/metrics/report"  # Panopticon 主机的 WireGuard 内网地址
+shared_secret: "跟 Panopticon config.yaml 里 metrics_agent.shared_secret 保持一致"
+interval_seconds: 60

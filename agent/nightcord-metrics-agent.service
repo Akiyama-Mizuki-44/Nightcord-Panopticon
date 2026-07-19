@@ -1,0 +1,17 @@
+[Unit]
+Description=Nightcord Panopticon self-hosted metrics agent
+After=network.target
+
+[Service]
+Type=simple
+User=root
+# 采集 CPU/内存/磁盘/网络不需要 root，改成面板服务器上的普通用户也可以，
+# 这里用 root 只是因为宝塔面板服务器上大多数东西本来就是 root 起的，图省事。
+WorkingDirectory=/path/to/nightcord-metrics-agent
+Environment=PATH=/path/to/nightcord-metrics-agent/.venv/bin
+ExecStart=/path/to/nightcord-metrics-agent/.venv/bin/python metrics_agent.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
