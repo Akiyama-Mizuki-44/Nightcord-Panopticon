@@ -152,6 +152,86 @@ function renderDatabases(dbs){
   return `<div class="row"><span class="k">数据库总数</span><span>${list.length}</span></div>`;
 }
 
+const METRICS_RANGE_OPTIONS = [
+  {label:'1 小时', hours:1},
+  {label:'6 小时', hours:6},
+  {label:'24 小时', hours:24},
+  {label:'7 天', hours:168},
+];
+const metricsRangeState = {};
+
+function metricsSlug(panelName){
+  return (panelName || '').replace(/[^a-zA-Z0-9_-]/g, c => '_' + c.charCodeAt(0) + '_');
+}
+
+function metricsSvg(samples){
+  const w = 300, h = 56;
+  const series = [
+    {k:'cpu', color:'var(--ok)'},
+    {k:'mem', color:'var(--accent)'},
+    {k:'disk', color:'var(--warn)'},
+  ];
+  const tsList = samples.map(s=>s.ts);
+  const minTs = Math.min(...tsList), maxTs = Math.max(...tsList);
+  const span = Math.max(maxTs - minTs, 1);
+  const x = t => ((t - minTs) / span) * w;
+  const y = v => h - (Math.min(100, Math.max(0, v ?? 0)) / 100) * h;
+  const lines = series.map(({k,color}) => {
+    const pts = samples.map(s => `${x(s.ts).toFixed(1)},${y(s[k]).toFixed(1)}`).join(' ');
+    return `<polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.5"/>`;
+  }).join('');
+  return `<svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}" preserveAspectRatio="none"
+    style="background:#0c0e13;border-radius:6px;display:block">${lines}</svg>`;
+}
+
+function metricsLegend(last){
+  const items = [
+    {label:'CPU', color:'var(--ok)', v:last.cpu},
+    {label:'内存', color:'var(--accent)', v:last.mem},
+    {label:'磁盘', color:'var(--warn)', v:last.disk},
+  ];
+  return `<div style="display:flex;gap:14px;font-size:11px;color:var(--muted);margin-top:4px">
+    ${items.map(i=>`<span><span class="dot" style="width:7px;height:7px;background:${i.color}"></span>
+      ${i.label} ${i.v!==undefined && i.v!==null ? Number(i.v).toFixed(1)+'%' : '-'}</span>`).join('')}
+  </div>`;
+}
+
+function metricsRangeSelect(panelName){
+  const current = metricsRangeState[panelName] ?? 6;
+  const opts = METRICS_RANGE_OPTIONS.map(o=>
+    `<option value="${o.hours}" ${o.hours===current?'selected':''}>${o.label}</option>`).join('');
+  return `<select onchange="onMetricsRangeChange('${panelName.replace(/'/g,"\\'")}', this.value)"
+    style="font-size:11px;background:#0c0e13;color:var(--text);border:1px solid var(--border);border-radius:4px">
+    ${opts}
+  </select>`;
+}
+
+async function loadMetricsHistory(panelName){
+  const el = document.getElementById('mtx-' + metricsSlug(panelName));
+  if(!el) return;
+  const hours = metricsRangeState[panelName] ?? 6;
+  try{
+    const res = await fetch(`/api/metrics/history?panel=${encodeURIComponent(panelName)}&hours=${hours}`);
+    if(!res.ok){ el.innerHTML = ''; return; }
+    const data = await res.json();
+    const samples = data.samples || [];
+    if(samples.length < 2){ el.innerHTML = ''; return; }
+    const last = samples[samples.length - 1];
+    el.innerHTML = `<div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+        <span>历史趋势</span>${metricsRangeSelect(panelName)}
+      </div>
+      ${metricsSvg(samples)}
+      ${metricsLegend(last)}`;
+  }catch(e){
+    el.innerHTML = '';
+  }
+}
+
+function onMetricsRangeChange(panelName, hours){
+  metricsRangeState[panelName] = Number(hours);
+  loadMetricsHistory(panelName);
+}
+
 function renderNightcordStatus(p){
   const targets = p.targets || [];
   if(!targets.length) return '<div class="err">无监控数据</div>';
@@ -190,6 +270,7 @@ function renderCard(p, idx){
     body += `<div class="section-title">磁盘</div>${renderDisk(p.disk)}`;
     body += `<div class="section-title">网站</div>${renderSites(p.sites)}`;
     body += `<div class="section-title">数据库</div>${renderDatabases(p.databases)}`;
+    body += `<div id="mtx-${metricsSlug(p.name || '')}"></div>`;
   }
   body += `<details><summary>查看原始数据</summary><pre>${escapeHtml(JSON.stringify(p, null, 2))}</pre></details>`;
   return `<div class="card" style="--accent-color:${member.color}">
@@ -225,6 +306,9 @@ async function refresh(){
     }
     empty.style.display = 'none';
     grid.innerHTML = panels.map((p, i) => renderCard(p, i)).join('');
+    panels.forEach(p => {
+      if(p.kind !== 'nightcord-status' && p.name) loadMetricsHistory(p.name);
+    });
     document.getElementById('updated').textContent =
       '最后更新: ' + new Date((data.ts||Date.now()/1000)*1000).toLocaleTimeString() + (data.cached ? '（缓存）' : '');
   }catch(e){
