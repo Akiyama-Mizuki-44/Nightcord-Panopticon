@@ -14,6 +14,7 @@ import socket
 import time
 
 import paramiko
+import yaml
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 AGENT_SRC_DIR = os.path.join(BASE_DIR, "agent")
@@ -52,8 +53,8 @@ def deploy_agent(ip, port, ssh_user, password, report_url, shared_secret, log=No
 
         is_root = ssh_user == "root"
 
-        panel_name = _run(ssh, "echo $HOME && hostname", emit).strip().splitlines()[-1].strip() or ip
-        home = _run(ssh, "echo $HOME", emit).strip()
+        home, panel_name = _run(ssh, "echo $HOME && hostname", emit).strip().splitlines()[-2:]
+        home, panel_name = home.strip(), panel_name.strip() or ip
         remote_dir = f"{home}/{REMOTE_DIR_NAME}"
         emit(f"目标机器 hostname：{panel_name}，安装目录：{remote_dir}")
 
@@ -65,11 +66,15 @@ def deploy_agent(ip, port, ssh_user, password, report_url, shared_secret, log=No
             for fname in ("metrics_agent.py", "requirements.txt"):
                 sftp.put(os.path.join(AGENT_SRC_DIR, fname), f"{remote_dir}/{fname}")
 
-            agent_config = (
-                f'panel_name: "{panel_name}"\n'
-                f'report_url: "{report_url}"\n'
-                f'shared_secret: "{shared_secret}"\n'
-                f'interval_seconds: 60\n'
+            agent_config = yaml.safe_dump(
+                {
+                    "panel_name": panel_name,
+                    "report_url": report_url,
+                    "shared_secret": shared_secret,
+                    "interval_seconds": 60,
+                },
+                allow_unicode=True,
+                sort_keys=False,
             )
             with sftp.file(f"{remote_dir}/agent_config.yaml", "w") as f:
                 f.write(agent_config)
