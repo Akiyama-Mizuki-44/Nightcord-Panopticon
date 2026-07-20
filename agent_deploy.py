@@ -1,0 +1,175 @@
+"""
+一键远程部署青源 agent（agent/metrics_agent.py）到面板服务器。
+
+SSH 到目标机器：同步 agent 代码、建虚拟环境装依赖、写 agent_config.yaml、
+注册 systemd 服务并启动。密码只在这一次连接里用，用完即从这个函数的调用栈里消失——
+是否把密码加密落库交给调用方（见 agent_hosts.py），这个模块本身不做任何持久化。
+
+主机指纹用的是"首次连接自动信任"（TOFU），跟大多数面板的一键装法一路子，
+不是绝对安全（理论上第一次连接可能被中间人劫持），指纹会记进返回的 log 里，
+多疑的话可以自己去目标机器上核对。
+"""
+import os
+import socket
+import time
+
+import paramiko
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+AGENT_SRC_DIR = os.path.join(BASE_DIR, "agent")
+REMOTE_DIR_NAME = "nightcord-metrics-agent"
+SERVICE_NAME = "nightcord-metrics-agent"
+
+
+class AgentDeployError(Exception):
+    """部署失败，message 可以直接原样展示给前端。"""
+
+
+def deploy_agent(ip, port, ssh_user, password, report_url, shared_secret, log=None):
+    """返回部署成功后使用的 panel_name（取自目标机器的 hostname）。失败抛 AgentDeployError。"""
+    def emit(line):
+        if log:
+            log(line)
+
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    emit(f"连接 {ssh_user}@{ip}:{port} ...")
+    try:
+        ssh.connect(
+            ip, port=port, username=ssh_user, password=password,
+            timeout=15, banner_timeout=15, auth_timeout=15,
+            look_for_keys=False, allow_agent=False,
+        )
+    except paramiko.AuthenticationException:
+        raise AgentDeployError("SSH 账号或密码不对")
+    except (socket.timeout, socket.error, paramiko.SSHException) as e:
+        raise AgentDeployError(f"连接失败：{e}")
+
+    try:
+        host_key = ssh.get_transport().get_remote_server_key()
+        emit(f"已连接。主机指纹（{host_key.get_name()}）：{host_key.get_base64()[:44]}...")
+
+        is_root = ssh_user == "root"
+
+        panel_name = _run(ssh, "echo $HOME && hostname", emit).strip().splitlines()[-1].strip() or ip
+        home = _run(ssh, "echo $HOME", emit).strip()
+        remote_dir = f"{home}/{REMOTE_DIR_NAME}"
+        emit(f"目标机器 hostname：{panel_name}，安装目录：{remote_dir}")
+
+        _run(ssh, f"mkdir -p {remote_dir}", emit)
+
+        emit("上传 agent 代码 ...")
+        sftp = ssh.open_sftp()
+        try:
+            for fname in ("metrics_agent.py", "requirements.txt"):
+                sftp.put(os.path.join(AGENT_SRC_DIR, fname), f"{remote_dir}/{fname}")
+
+            agent_config = (
+                f'panel_name: "{panel_name}"\n'
+                f'report_url: "{report_url}"\n'
+                f'shared_secret: "{shared_secret}"\n'
+                f'interval_seconds: 60\n'
+            )
+            with sftp.file(f"{remote_dir}/agent_config.yaml", "w") as f:
+                f.write(agent_config)
+            sftp.chmod(f"{remote_dir}/agent_config.yaml", 0o600)
+        finally:
+            sftp.close()
+
+        emit("创建虚拟环境并安装依赖（可能要一会儿）...")
+        _run(ssh, f"python3 -m venv {remote_dir}/.venv", emit, timeout=120)
+        _run(
+            ssh,
+            f"{remote_dir}/.venv/bin/pip install --quiet --disable-pip-version-check "
+            f"-r {remote_dir}/requirements.txt",
+            emit, timeout=300,
+        )
+
+        emit("注册 systemd 服务 ...")
+        unit = _build_unit_file(remote_dir)
+        _write_privileged_file(
+            ssh, "/etc/systemd/system/nightcord-metrics-agent.service", unit, password, is_root, emit,
+        )
+        _run_privileged(ssh, "systemctl daemon-reload", password, is_root, emit)
+        _run_privileged(ssh, f"systemctl enable --now {SERVICE_NAME}", password, is_root, emit)
+
+        time.sleep(1.5)  # 给 systemd 一点时间把服务从 activating 拉到 active
+        status = _run(ssh, f"systemctl is-active {SERVICE_NAME}", emit, check=False).strip()
+        if status != "active":
+            raise AgentDeployError(
+                f"服务已安装但状态是「{status}」而不是 active，"
+                f"去目标机器上 journalctl -u {SERVICE_NAME} -n 50 看看具体报错"
+            )
+        emit("青源 agent 已启动 ✓")
+        return panel_name
+    finally:
+        ssh.close()
+
+
+def _build_unit_file(remote_dir):
+    return (
+        "[Unit]\n"
+        "Description=Nightcord Panopticon self-hosted metrics agent\n"
+        "After=network.target\n\n"
+        "[Service]\n"
+        "Type=simple\n"
+        f"WorkingDirectory={remote_dir}\n"
+        f"ExecStart={remote_dir}/.venv/bin/python {remote_dir}/metrics_agent.py\n"
+        "Restart=always\n"
+        "RestartSec=5\n\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
+
+
+def _run(ssh, cmd, emit, timeout=30, check=True):
+    stdin, stdout, stderr = ssh.exec_command(cmd, timeout=timeout)
+    out = stdout.read().decode("utf-8", "replace")
+    err = stderr.read().decode("utf-8", "replace")
+    exit_code = stdout.channel.recv_exit_status()
+    if check and exit_code != 0:
+        emit(f"  ! 命令失败（exit {exit_code}）：{cmd[:80]}")
+        if err.strip():
+            emit(f"    {err.strip()[:400]}")
+        raise AgentDeployError(f"远端命令执行失败：{cmd[:60]}（exit {exit_code}）\n{err.strip()[:300]}")
+    return out
+
+
+def _run_privileged(ssh, cmd, password, is_root, emit, timeout=30):
+    """root 账号直接跑；非 root 账号走 sudo -S，用同一个 SSH 密码当 sudo 密码。"""
+    if is_root:
+        _run(ssh, cmd, emit, timeout=timeout)
+        return
+    full_cmd = f"sudo -S -p '' {cmd}"
+    stdin, stdout, stderr = ssh.exec_command(full_cmd, timeout=timeout)
+    stdin.write(password + "\n")
+    stdin.flush()
+    out = stdout.read().decode("utf-8", "replace")
+    err = stderr.read().decode("utf-8", "replace")
+    exit_code = stdout.channel.recv_exit_status()
+    if exit_code != 0:
+        emit(f"  ! sudo 命令失败（exit {exit_code}）：{cmd[:80]}")
+        raise AgentDeployError(f"sudo 执行失败（可能是这个账号的 sudo 密码跟 SSH 密码不一致）：{cmd[:60]}\n{err.strip()[:300]}")
+    return out
+
+
+def _write_privileged_file(ssh, remote_path, content, password, is_root, emit):
+    if is_root:
+        sftp = ssh.open_sftp()
+        try:
+            with sftp.file(remote_path, "w") as f:
+                f.write(content)
+        finally:
+            sftp.close()
+        return
+    full_cmd = f"sudo -S -p '' tee {remote_path} > /dev/null"
+    stdin, stdout, stderr = ssh.exec_command(full_cmd)
+    stdin.write(password + "\n")
+    stdin.write(content)
+    stdin.channel.shutdown_write()
+    err = stderr.read().decode("utf-8", "replace")
+    exit_code = stdout.channel.recv_exit_status()
+    if exit_code != 0:
+        emit(f"  ! 写入 {remote_path} 失败（exit {exit_code}）")
+        raise AgentDeployError(f"写入 {remote_path} 失败：{err.strip()[:300]}")

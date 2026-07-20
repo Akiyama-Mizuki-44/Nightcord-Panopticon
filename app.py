@@ -8,6 +8,7 @@
 """
 import hmac
 import os
+import secrets
 import threading
 import time
 import yaml
@@ -20,6 +21,8 @@ from nightcord_status_client import NightcordStatusClient
 from notifier import Notifier, evaluate_alerts
 from auth import BruteForceGuard, get_client_ip
 from config_editor import redact_for_display, merge_submitted
+from agent_deploy import deploy_agent, AgentDeployError
+import agent_hosts
 import metrics_store
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -242,6 +245,97 @@ def api_save_config():
     return jsonify({"ok": True})
 
 
+def _ensure_metrics_agent_secret(cfg):
+    """一键部署 agent 时如果 metrics_agent 这段还没配过，顺手把它打开并生成一个共享密钥，
+    省得用户还得回去手改 config.yaml。返回是否改动了 cfg（改了才需要落盘）。
+    """
+    ma = cfg.setdefault("metrics_agent", {})
+    changed = False
+    if not ma.get("enabled"):
+        ma["enabled"] = True
+        changed = True
+    if not ma.get("shared_secret"):
+        ma["shared_secret"] = secrets.token_hex(32)
+        changed = True
+    if "retention_days" not in ma:
+        ma["retention_days"] = 30
+        changed = True
+    return changed
+
+
+def _deploy_and_report(ip, port, ssh_user, password, remember):
+    """一键装 agent 的公共逻辑，POST /api/agent/deploy 和 .../redeploy 都走这里。"""
+    try:
+        cfg = load_config()
+    except RuntimeError:
+        return jsonify({"error": "还没有 config.yaml，先在设置页保存至少一台面板"}), 400
+
+    if _ensure_metrics_agent_secret(cfg):
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
+
+    report_url = f"{request.scheme}://{request.host}{METRICS_REPORT_PATH}"
+    shared_secret = cfg["metrics_agent"]["shared_secret"]
+
+    log_lines = []
+    try:
+        panel_name = deploy_agent(ip, port, ssh_user, password, report_url, shared_secret, log=log_lines.append)
+    except AgentDeployError as e:
+        return jsonify({"ok": False, "error": str(e), "log": log_lines}), 400
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"未预期的错误：{e}", "log": log_lines}), 500
+
+    if remember:
+        agent_hosts.save_host(CONFIG_PATH, ip, port, ssh_user, password, panel_name)
+    _cache["data"] = None  # 新 agent 上线后下一次 /api/status 应该重新拉取一次
+    return jsonify({"ok": True, "panel_name": panel_name, "log": log_lines})
+
+
+@app.route("/api/agent/deploy", methods=["POST"])
+def api_agent_deploy():
+    """在设置页填 IP/端口/SSH 账号密码，一键 SSH 上去装青源 agent 并注册 systemd。"""
+    body = request.get_json(silent=True) or {}
+    ip = (body.get("ip") or "").strip()
+    try:
+        port = int(body.get("port") or 22)
+    except (TypeError, ValueError):
+        return jsonify({"error": "端口必须是数字"}), 400
+    ssh_user = (body.get("ssh_user") or "root").strip()
+    password = body.get("password") or ""
+    remember = bool(body.get("remember"))
+    if not ip or not password:
+        return jsonify({"error": "服务器 IP 和 SSH 密码不能为空"}), 400
+    return _deploy_and_report(ip, port, ssh_user, password, remember)
+
+
+@app.route("/api/agent/hosts", methods=["GET"])
+def api_agent_hosts():
+    try:
+        cfg = load_config()
+    except RuntimeError:
+        cfg = {}
+    return jsonify({"hosts": agent_hosts.list_hosts(cfg)})
+
+
+@app.route("/api/agent/hosts/<path:host_id>/redeploy", methods=["POST"])
+def api_agent_redeploy(host_id):
+    """用之前勾选过"记住密码"的那台服务器的凭据重新装一遍，不用再填密码。"""
+    try:
+        cfg = load_config()
+    except RuntimeError:
+        return jsonify({"error": "还没有 config.yaml"}), 400
+    cred = agent_hosts.get_host_credentials(cfg, host_id)
+    if not cred:
+        return jsonify({"error": "没找到这台已保存的服务器（可能当时没勾选记住密码，或密钥文件变了）"}), 404
+    return _deploy_and_report(cred["ip"], cred["port"], cred["ssh_user"], cred["password"], True)
+
+
+@app.route("/api/agent/hosts/<path:host_id>", methods=["DELETE"])
+def api_agent_delete_host(host_id):
+    agent_hosts.delete_host(CONFIG_PATH, host_id)
+    return jsonify({"ok": True})
+
+
 def background_alert_loop():
     """后台巡检线程：定期拉取所有面板数据、判断阈值、发送告警，并顺带刷新缓存。"""
     while True:
@@ -282,4 +376,4 @@ if __name__ == "__main__":
     t2.start()
     debug = os.environ.get("FLASK_DEBUG") == "1"
     port = int(os.environ.get("PORT", 1810))
-    app.run(host="0.0.0.0", port=port, debug=debug, use_reloader=False)
+    app.run(host="0.0.0.0", port=port, debug=debug, use_reloader=False, threaded=True)

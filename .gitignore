@@ -1,6 +1,7 @@
 config.yaml
 metrics.db
 agent/agent_config.yaml
+agent_hosts.key
 __pycache__/
 *.pyc
 .venv/

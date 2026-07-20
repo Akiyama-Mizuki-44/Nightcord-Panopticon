@@ -14,12 +14,28 @@
 | 文件 | 作用 |
 |---|---|
 | `agent/metrics_agent.py` | 跑在各面板服务器，采集 CPU/内存/磁盘/网络，定时 push |
-| `agent/agent_config.example.yaml` | agent 的配置模板 |
+| `agent/agent_config.example.yaml` | agent 的配置模板（手动部署时用，见 `agent/README.zh-CN.md`） |
 | `agent/nightcord-metrics-agent.service` | agent 的 systemd 部署示例 |
 | `metrics_store.py` | Panopticon 侧的 SQLite 存储层（`metrics.db`） |
+| `agent_deploy.py` | 一键部署：SSH 到目标机器自动装 agent、写配置、注册并启动 systemd |
+| `agent_hosts.py` | 一键部署时"记住密码"选项的加密存储层（密钥文件 `agent_hosts.key`，不进仓库） |
 | `app.py` 里的 `POST /api/metrics/report` | agent 上报入口，共享密钥鉴权 |
 | `app.py` 里的 `GET /api/metrics/history` | 历史数据读接口，走 dashboard_auth |
 | `app.py` 里的 `GET /api/metrics/version` | 返回当前青源版本号 |
+| `app.py` 里的 `/api/agent/deploy`、`/api/agent/hosts*` | 一键部署相关接口，走 dashboard_auth |
+
+## 部署方式
+
+两种都行，效果一样：
+
+1. **一键部署（推荐）**：`/settings` 页面「一键部署 agent」区块，填服务器 IP / 端口 / SSH 账号密码，
+   点一下自动装完（对应 `agent_deploy.py`）。`metrics_agent.enabled` 和 `shared_secret` 会在第一次
+   一键部署时自动补全，不用再手动改 `config.yaml`。
+2. **手动部署**：见 `agent/README.zh-CN.md`，自己 rsync 代码、装依赖、写 `agent_config.yaml`、配 systemd。
+
+一键部署目前假设目标机器上有 `python3`（含 `venv` 模块）和 `systemd`；账号不是 `root` 的话会自动走
+`sudo -S`（要求 sudo 密码跟 SSH 登录密码一致）。主机指纹用的是"首次连接自动信任"（TOFU），部署日志里
+会打印出来，多疑的话可以自己去目标机核对。
 
 ## 版本历史
 
