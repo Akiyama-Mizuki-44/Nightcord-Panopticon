@@ -18,7 +18,7 @@ from werkzeug.security import check_password_hash
 
 from bt_client import BTClient
 from nightcord_status_client import NightcordStatusClient
-from notifier import Notifier, evaluate_alerts
+from notifier import Notifier, evaluate_alerts, evaluate_agent_alerts
 from auth import BruteForceGuard, get_client_ip
 from config_editor import redact_for_display, merge_submitted
 from agent_deploy import deploy_agent, AgentDeployError
@@ -184,6 +184,7 @@ def api_metrics_report():
         return jsonify({"error": "缺少 panel"}), 400
 
     metrics_store.insert_sample(panel, ts, cpu, mem, disk, net_in_kbps, net_out_kbps)
+    metrics_store.upsert_ip(panel, body.get("ip_internal"), body.get("ip_external"))
     return jsonify({"ok": True})
 
 
@@ -243,6 +244,20 @@ def api_save_config():
         yaml.safe_dump(merged, f, allow_unicode=True, sort_keys=False)
     _cache["data"] = None  # 配置变了，强制下次 /api/status 重新拉取而不是用旧缓存
     return jsonify({"ok": True})
+
+
+@app.route("/api/notifications/test", methods=["POST"])
+def api_notifications_test():
+    """设置页"发送测试通知"按钮：用已保存的 config.yaml 里的飞书配置发一条模拟告警卡片，
+    用来确认 Webhook 是不是真的通（不是只看 HTTP 状态码，飞书那边很多错误也返回 200）。
+    """
+    try:
+        cfg = load_config()
+    except RuntimeError:
+        return jsonify({"ok": False, "error": "还没有 config.yaml，先在设置页保存通知配置"}), 400
+    notifier = Notifier(cfg.get("notifications", {}))
+    ok, message = notifier.send_feishu_test()
+    return jsonify({"ok": ok, "message": message})
 
 
 def _ensure_metrics_agent_secret(cfg):
@@ -349,8 +364,17 @@ def background_alert_loop():
             thresholds = notif_cfg.get("thresholds", {})
             notifier = Notifier(notif_cfg)
             for panel_result in data:
-                for key, title, content in evaluate_alerts(panel_result, thresholds):
-                    notifier.notify(key, title, content)
+                for alert in evaluate_alerts(panel_result, thresholds):
+                    notifier.notify(alert)
+
+            # 青源（自建 agent）上报的机器不在 fetch_all() 的面板列表里，要单独按最新样本判断阈值。
+            # 只看最近还在上报的面板，避免给早就下线/卸载的 agent 反复报警。
+            stale_after = ALERT_CHECK_INTERVAL * 3
+            for panel_name in metrics_store.list_active_panels(time.time() - stale_after):
+                sample = metrics_store.get_latest(panel_name)
+                ip = metrics_store.get_ip(panel_name)
+                for alert in evaluate_agent_alerts(panel_name, sample, thresholds, ip["ip_external"], ip["ip_internal"]):
+                    notifier.notify(alert)
         except Exception as e:
             print(f"[background_alert_loop] 出错: {e}")
         time.sleep(ALERT_CHECK_INTERVAL)

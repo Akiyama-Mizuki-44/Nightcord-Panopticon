@@ -43,6 +43,7 @@ metrics_agent:
   retention_days: 30   # 超过这么多天的历史数据会被自动清理
 
 # 告警通知（面板离线 / CPU / 内存 / 磁盘超阈值时推送）
+# 阈值同时适用于宝塔面板和青源（自建 agent，见 metrics_agent 段）上报的机器。
 notifications:
   cooldown_seconds: 600   # 同一条告警的最小推送间隔，避免刷屏
 
@@ -53,7 +54,8 @@ notifications:
 
   feishu:
     enabled: false
-    # 飞书群 -> 设置 -> 群机器人 -> 添加"自定义机器人"，复制 Webhook 地址
+    # 飞书群 -> 设置 -> 群机器人 -> 添加"自定义机器人"，复制 Webhook 地址。
+    # 推送的是卡片消息（含 @所有人），机器人要关闭"签名校验"，否则会发送失败。
     webhook: "https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 
   email:

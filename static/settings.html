@@ -43,6 +43,7 @@
            padding:20px 0 8px;display:flex;gap:10px;align-items:center}
   #msg{font-size:13px}
   #msg.ok{color:var(--ok)} #msg.err{color:var(--bad)}
+  #feishuTestMsg.ok{color:var(--ok)} #feishuTestMsg.err{color:var(--bad)}
   .hint{color:var(--muted);font-size:11px;margin-top:4px}
   footer{padding:24px 28px;text-align:center;color:var(--muted);font-size:11px}
 </style>
@@ -143,6 +144,9 @@
     <label>Webhook 地址</label>
     <input type="password" id="feishuWebhook" placeholder="留空则不修改">
     <div class="hint" id="feishuHint"></div>
+    <div class="hint">测试用的是<b>已保存</b>的配置，改了 Webhook 要先"保存配置"再测试。</div>
+    <button type="button" onclick="testFeishu()">发送测试通知</button>
+    <span id="feishuTestMsg" class="hint"></span>
   </section>
 
   <section>
@@ -353,6 +357,21 @@ function showDeployResult(ok, data, msg, log){
     log.textContent = data.log.join('\n');
   } else {
     log.style.display = 'none';
+  }
+}
+
+async function testFeishu(){
+  const msg = document.getElementById('feishuTestMsg');
+  msg.className = 'hint';
+  msg.textContent = '发送中…';
+  try{
+    const res = await fetch('/api/notifications/test', {method: 'POST'});
+    const data = await res.json();
+    msg.className = data.ok ? 'ok' : 'err';
+    msg.textContent = data.message || data.error || (data.ok ? '成功' : '失败');
+  }catch(e){
+    msg.className = 'err';
+    msg.textContent = '请求失败：' + e;
   }
 }
 
