@@ -45,6 +45,10 @@ PUBLIC_ENDPOINTS = {"login_page", "login_password", "logout", "webauthn_login_op
 _cache = {"data": None, "ts": 0}
 CACHE_TTL = 10  # 秒
 
+# 常驻一个 Notifier 实例，不要在 background_alert_loop 每轮里 new 一个新的——
+# 那样它内部记的"这个问题已经通知过"的状态每 60 秒就被清空一次，等于永远发不完。
+_notifier = Notifier({})
+
 ALERT_CHECK_INTERVAL = 60  # 秒，后台告警巡检间隔（与前端是否打开无关）
 AGENT_STALE_SECONDS = 180  # 秒，青源 agent 超过这么久没上报就不当它在线（默认上报间隔 60s，留够 3 倍余量）
 METRICS_PRUNE_INTERVAL = 3600  # 秒，自建监控 agent 历史数据的清理巡检间隔
@@ -608,10 +612,12 @@ def background_alert_loop():
 
             notif_cfg = cfg.get("notifications", {})
             thresholds = notif_cfg.get("thresholds", {})
-            notifier = Notifier(notif_cfg)
+            _notifier.update_config(notif_cfg)
+            active_keys = set()
             for panel_result in data:
                 for alert in evaluate_alerts(panel_result, thresholds):
-                    notifier.notify(alert)
+                    active_keys.add(alert["key"])
+                    _notifier.notify(alert)
 
             # 青源（自建 agent）上报的机器不一定跟宝塔面板重名，要单独按最新样本判断阈值。
             # 只看最近还在上报的面板，避免给早就下线/卸载的 agent 反复报警。
@@ -619,7 +625,11 @@ def background_alert_loop():
                 sample = metrics_store.get_latest(panel_name)
                 ip = metrics_store.get_ip(panel_name)
                 for alert in evaluate_agent_alerts(panel_name, sample, thresholds, ip["ip_external"], ip["ip_internal"]):
-                    notifier.notify(alert)
+                    active_keys.add(alert["key"])
+                    _notifier.notify(alert)
+
+            # 这轮没再出现的 key 就是问题解决了，从"已通知"名单里摘掉，以后再犯还能收到通知
+            _notifier.resolve(active_keys)
         except Exception as e:
             print(f"[background_alert_loop] 出错: {e}")
         time.sleep(ALERT_CHECK_INTERVAL)

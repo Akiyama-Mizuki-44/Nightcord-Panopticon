@@ -48,7 +48,9 @@ metrics_agent:
 # 告警通知（面板离线 / CPU / 内存 / 磁盘超阈值时推送）
 # 阈值同时适用于宝塔面板和青源（自建 agent，见 metrics_agent 段）上报的机器。
 notifications:
-  cooldown_seconds: 600   # 同一条告警的最小推送间隔，避免刷屏
+  # 同一个问题（比如"面板A的CPU告警"）只在刚触发时发一次，问题没解决之前不会重复推送；
+  # 这个值只在"问题解决后又复发"时起作用——两次触发间隔小于它，就当是抖动，先不通知。
+  cooldown_seconds: 600
 
   thresholds:
     cpu: 90    # CPU 使用率 %

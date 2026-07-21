@@ -26,15 +26,34 @@ class Notifier:
         """
         self.config = config or {}
         self.cooldown = self.config.get("cooldown_seconds", 600)
-        self._last_sent = {}  # key -> timestamp，用于同一告警的冷却去重
+        self._last_sent = {}  # key -> 上次通知时间戳，问题解决后又复发时用来防抖
+        self._active = set()  # 当前"已经通知过、问题还没解决"的 key，同一个问题只发一次
+
+    def update_config(self, config: dict):
+        """巡检线程每轮都会重新读一次 config.yaml，用这个刷新配置，
+        而不是每轮都 new 一个 Notifier ——不然 _active/_last_sent 全被清空，
+        等于每轮都当成新问题重新通知一遍，跟"发一遍就够了"背道而驰。
+        """
+        self.config = config or {}
+        self.cooldown = self.config.get("cooldown_seconds", 600)
 
     def _should_send(self, key: str) -> bool:
+        if key in self._active:
+            return False  # 这个问题还没解决，之前已经通知过了，不用再发
         now = time.time()
         last = self._last_sent.get(key, 0)
         if now - last < self.cooldown:
-            return False
+            return False  # 刚解决又复发（抖动）也别刷屏，等冷却过了才重新算一次新问题
         self._last_sent[key] = now
+        self._active.add(key)
         return True
+
+    def resolve(self, still_active_keys: set):
+        """
+        每轮巡检结束时调用：这轮里已经不再出现的 key 说明问题解决了，
+        从"已通知"名单里摘掉，以后再犯还能收到通知（而不是永远只通知一次）。
+        """
+        self._active &= still_active_keys
 
     def notify(self, alert: dict):
         """
