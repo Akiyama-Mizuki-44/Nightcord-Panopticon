@@ -7,15 +7,17 @@
 然后浏览器打开 http://127.0.0.1:1810
 """
 import hmac
+import json
 import os
 import secrets
 import threading
 import time
 import yaml
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from flask import Flask, jsonify, request, send_from_directory, Response
+from flask import Flask, jsonify, request, send_from_directory, Response, session, redirect, url_for
 from werkzeug.security import check_password_hash
 
+import webauthn_manager as wam
 from bt_client import BTClient
 from nightcord_status_client import NightcordStatusClient
 from notifier import Notifier, evaluate_alerts, evaluate_agent_alerts
@@ -29,9 +31,14 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.yaml")
 
 app = Flask(__name__, static_folder=os.path.join(BASE_DIR, "static"))
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_HTTPONLY"] = True
 metrics_store.init_db()
 
 _brute_force_guard = BruteForceGuard()  # 默认 5 次失败锁 15 分钟，实际阈值以 config.yaml 为准（见 enforce_auth）
+
+# 不需要登录就能访问的路由：登录页本身，以及登录相关的两个 API（否则没法登录）
+PUBLIC_ENDPOINTS = {"login_page", "login_password", "logout", "webauthn_login_options", "webauthn_login_verify"}
 
 # 简单内存缓存，避免每次刷新都重新请求所有面板
 _cache = {"data": None, "ts": 0}
@@ -56,15 +63,40 @@ def load_panels():
     return load_config().get("panels", [])
 
 
+def save_config(cfg):
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
+
+
+def ensure_session_secret():
+    """
+    session cookie 签名密钥；持久化在 config.yaml 里，
+    这样多进程(gunicorn 多 worker)部署时大家读到的是同一个值，重启也不会互相把对方的 session 弄失效。
+    config.yaml 还不存在（第一次运行、还没走完配置向导）时用一个临时的随机值顶着。
+    """
+    try:
+        cfg = load_config()
+    except RuntimeError:
+        return secrets.token_hex(32)
+    da = cfg.setdefault("dashboard_auth", {})
+    if not da.get("session_secret"):
+        da["session_secret"] = secrets.token_hex(32)
+        save_config(cfg)
+    return da["session_secret"]
+
+
+app.secret_key = ensure_session_secret()
+
+
 @app.before_request
 def enforce_auth():
     """
-    Dashboard 现在按设计要长期暴露公网，所以给所有路由加一层 HTTP Basic Auth，
+    Dashboard 按设计要长期暴露公网，所以给所有路由加一层登录门槛（密码 + 可选 Passkey），
     并按来源 IP 做暴力破解锁定。dashboard_auth.enabled 为 false（默认）时不做任何限制，
     适合只在 WireGuard 内网访问、不打算公网暴露的部署方式。
     """
     if request.path == METRICS_REPORT_PATH:
-        return  # agent 机器对机器上报，鉴权走独立的共享密钥（见 api_metrics_report），不走 Basic Auth
+        return  # agent 机器对机器上报，鉴权走独立的共享密钥（见 api_metrics_report），不走登录态鉴权
     try:
         cfg = load_config()
     except RuntimeError:
@@ -73,36 +105,178 @@ def enforce_auth():
     if not auth_cfg.get("enabled"):
         return
 
-    _brute_force_guard.max_attempts = auth_cfg.get("max_attempts", 5)
-    _brute_force_guard.lockout_seconds = auth_cfg.get("lockout_seconds", 900)
+    if request.endpoint in PUBLIC_ENDPOINTS or request.endpoint == "static":
+        return
+    if session.get("authed"):
+        return
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "未登录"}), 401
+    return redirect(url_for("login_page"))
 
+
+@app.route("/login", methods=["GET"])
+def login_page():
+    return send_from_directory(app.static_folder, "login.html")
+
+
+@app.route("/login", methods=["POST"])
+def login_password():
+    cfg = load_config()
+    auth_cfg = cfg.get("dashboard_auth", {})
     ip = get_client_ip(request)
     locked, retry_after = _brute_force_guard.is_locked(ip)
     if locked:
-        resp = Response(f"失败次数过多，请 {retry_after} 秒后再试。", status=429)
+        resp = jsonify({"error": f"失败次数过多，请 {retry_after} 秒后再试。"})
         resp.headers["Retry-After"] = str(retry_after)
-        return resp
+        return resp, 429
 
-    auth = request.authorization
-    expected_user = auth_cfg.get("username", "")
+    _brute_force_guard.max_attempts = auth_cfg.get("max_attempts", 5)
+    _brute_force_guard.lockout_seconds = auth_cfg.get("lockout_seconds", 900)
+
+    data = request.get_json(silent=True) or {}
     expected_hash = auth_cfg.get("password_hash", "")
     ok = bool(
-        auth
-        and expected_hash
-        and auth.username == expected_user
-        and check_password_hash(expected_hash, auth.password)
+        expected_hash
+        and data.get("username") == auth_cfg.get("username", "")
+        and check_password_hash(expected_hash, data.get("password", ""))
     )
     if not ok:
-        if auth is not None:
-            # 只有真的带了(错误的)用户名密码才算一次失败尝试；
-            # 浏览器第一次弹登录框前的匿名请求不计数，避免正常访问被误伤。
-            _brute_force_guard.record_failure(ip)
-        return Response(
-            "需要登录才能访问 Nightcord Panopticon。",
-            401,
-            {"WWW-Authenticate": 'Basic realm="Nightcord Panopticon"'},
-        )
+        _brute_force_guard.record_failure(ip)
+        return jsonify({"error": "用户名或密码错误"}), 401
+
     _brute_force_guard.record_success(ip)
+    session.clear()
+    session["authed"] = True
+    session.permanent = True
+    return jsonify({"ok": True})
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/webauthn/register/options", methods=["GET"])
+def webauthn_register_options():
+    cfg = load_config()
+    auth_cfg = cfg.get("dashboard_auth", {})
+    username = auth_cfg.get("username") or "admin"
+    rp_id = wam.rp_id_from_request(request)
+    challenge_b64, options_json = wam.registration_options(rp_id, username, auth_cfg.get("passkeys") or [])
+    session["webauthn_challenge"] = challenge_b64
+    session["webauthn_rp_id"] = rp_id
+    return Response(options_json, mimetype="application/json")
+
+
+@app.route("/api/webauthn/register/verify", methods=["POST"])
+def webauthn_register_verify():
+    body = request.get_json(silent=True) or {}
+    credential = body.get("credential")
+    name = (body.get("name") or "").strip() or "未命名 Passkey"
+    challenge_b64 = session.pop("webauthn_challenge", None)
+    rp_id = session.pop("webauthn_rp_id", None)
+    if not credential or not challenge_b64 or not rp_id:
+        return jsonify({"error": "注册会话已过期，请重试"}), 400
+
+    credential_json = credential if isinstance(credential, str) else json.dumps(credential)
+    try:
+        record = wam.verify_registration(credential_json, challenge_b64, rp_id, wam.origin_from_request(request))
+    except Exception as e:
+        return jsonify({"error": f"验证失败：{e}"}), 400
+
+    cfg = load_config()
+    da = cfg.setdefault("dashboard_auth", {})
+    passkeys = da.setdefault("passkeys", [])
+    passkeys.append({**record, "name": name, "created_at": time.time()})
+    save_config(cfg)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/webauthn/passkeys", methods=["GET"])
+def webauthn_list_passkeys():
+    cfg = load_config()
+    passkeys = cfg.get("dashboard_auth", {}).get("passkeys") or []
+    return jsonify([
+        {"credential_id": p["credential_id"], "name": p.get("name", ""), "created_at": p.get("created_at")}
+        for p in passkeys
+    ])
+
+
+@app.route("/api/webauthn/passkeys/<credential_id>", methods=["DELETE"])
+def webauthn_delete_passkey(credential_id):
+    cfg = load_config()
+    da = cfg.setdefault("dashboard_auth", {})
+    passkeys = da.get("passkeys") or []
+    remaining = [p for p in passkeys if p.get("credential_id") != credential_id]
+    if len(remaining) == len(passkeys):
+        return jsonify({"error": "未找到该 Passkey"}), 404
+    da["passkeys"] = remaining
+    save_config(cfg)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/webauthn/login/options", methods=["POST"])
+def webauthn_login_options():
+    cfg = load_config()
+    auth_cfg = cfg.get("dashboard_auth", {})
+    ip = get_client_ip(request)
+    locked, retry_after = _brute_force_guard.is_locked(ip)
+    if locked:
+        resp = jsonify({"error": f"失败次数过多，请 {retry_after} 秒后再试。"})
+        resp.headers["Retry-After"] = str(retry_after)
+        return resp, 429
+
+    rp_id = wam.rp_id_from_request(request)
+    challenge_b64, options_json = wam.authentication_options(rp_id, auth_cfg.get("passkeys") or [])
+    session["webauthn_challenge"] = challenge_b64
+    session["webauthn_rp_id"] = rp_id
+    return Response(options_json, mimetype="application/json")
+
+
+@app.route("/api/webauthn/login/verify", methods=["POST"])
+def webauthn_login_verify():
+    cfg = load_config()
+    auth_cfg = cfg.get("dashboard_auth", {})
+    ip = get_client_ip(request)
+    locked, retry_after = _brute_force_guard.is_locked(ip)
+    if locked:
+        resp = jsonify({"error": f"失败次数过多，请 {retry_after} 秒后再试。"})
+        resp.headers["Retry-After"] = str(retry_after)
+        return resp, 429
+
+    _brute_force_guard.max_attempts = auth_cfg.get("max_attempts", 5)
+    _brute_force_guard.lockout_seconds = auth_cfg.get("lockout_seconds", 900)
+
+    body = request.get_json(silent=True) or {}
+    credential = body.get("credential")
+    challenge_b64 = session.pop("webauthn_challenge", None)
+    rp_id = session.pop("webauthn_rp_id", None)
+    if not credential or not challenge_b64 or not rp_id:
+        _brute_force_guard.record_failure(ip)
+        return jsonify({"error": "登录会话已过期，请重试"}), 400
+
+    credential_json = credential if isinstance(credential, str) else json.dumps(credential)
+    stored = wam.find_passkey(auth_cfg.get("passkeys") or [], wam.extract_credential_id(credential))
+    if not stored:
+        _brute_force_guard.record_failure(ip)
+        return jsonify({"error": "未知的 Passkey"}), 401
+
+    try:
+        new_sign_count = wam.verify_authentication(
+            credential_json, challenge_b64, rp_id, wam.origin_from_request(request), stored
+        )
+    except Exception:
+        _brute_force_guard.record_failure(ip)
+        return jsonify({"error": "验证失败"}), 401
+
+    stored["sign_count"] = new_sign_count
+    save_config(cfg)
+    _brute_force_guard.record_success(ip)
+    session.clear()
+    session["authed"] = True
+    session.permanent = True
+    return jsonify({"ok": True})
 
 
 def fetch_all():
@@ -158,7 +332,7 @@ def api_status():
 @app.route(METRICS_REPORT_PATH, methods=["POST"])
 def api_metrics_report():
     """自建监控 agent（agent/metrics_agent.py）的上报入口，机器对机器调用。
-    鉴权用共享密钥而不是 dashboard_auth 的 Basic Auth（见 enforce_auth 里的例外）。
+    鉴权用共享密钥而不是 dashboard_auth 的登录态（见 enforce_auth 里的例外）。
     """
     cfg = load_config().get("metrics_agent", {})
     if not cfg.get("enabled"):
@@ -240,8 +414,7 @@ def api_save_config():
     merged, errors = merge_submitted(old_cfg, submitted)
     if errors:
         return jsonify({"errors": errors}), 400
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        yaml.safe_dump(merged, f, allow_unicode=True, sort_keys=False)
+    save_config(merged)
     _cache["data"] = None  # 配置变了，强制下次 /api/status 重新拉取而不是用旧缓存
     return jsonify({"ok": True})
 

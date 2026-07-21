@@ -126,6 +126,14 @@
   </section>
 
   <section>
+    <h2>Passkey（免密码登录）</h2>
+    <div class="desc">用设备生物识别 / 安全密钥登录，密码登录依然保留作为备用方式。需要通过 HTTPS 访问（本机 localhost 除外）。</div>
+    <div id="passkeyList"></div>
+    <button class="add" onclick="addPasskey()">+ 添加本设备的 Passkey</button>
+    <div class="hint" id="passkeyHint"></div>
+  </section>
+
+  <section>
     <h2>告警阈值</h2>
     <div class="desc">CPU / 内存 / 磁盘使用率超过这个百分比就触发告警。</div>
     <div class="row2" style="grid-template-columns:1fr 1fr 1fr">
@@ -201,6 +209,92 @@ function addPanelRow(p){
 
 function escapeAttr(s){
   return (s||'').replace(/"/g, '&quot;');
+}
+
+function base64urlToBuffer(base64url){
+  const base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
+  const pad = base64.length % 4 ? '='.repeat(4 - base64.length % 4) : '';
+  const raw = atob(base64 + pad);
+  const buf = new Uint8Array(raw.length);
+  for(let i=0;i<raw.length;i++) buf[i] = raw.charCodeAt(i);
+  return buf.buffer;
+}
+
+function bufferToBase64url(buf){
+  const bytes = new Uint8Array(buf);
+  let str = '';
+  for(const b of bytes) str += String.fromCharCode(b);
+  return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function loadPasskeys(){
+  const res = await fetch('/api/webauthn/passkeys');
+  if(!res.ok) return;
+  const list = await res.json();
+  const el = document.getElementById('passkeyList');
+  el.innerHTML = '';
+  if(!list.length){
+    el.innerHTML = '<div class="hint">还没有添加任何 Passkey</div>';
+    return;
+  }
+  list.forEach(p => {
+    const date = p.created_at ? new Date(p.created_at * 1000).toLocaleString() : '';
+    el.insertAdjacentHTML('beforeend', `<div class="panel-card">
+      <button class="remove" onclick="deletePasskey('${p.credential_id}')">删除</button>
+      <div>${escapeAttr(p.name)}</div>
+      <div class="hint">添加于 ${date}</div>
+    </div>`);
+  });
+}
+
+async function deletePasskey(id){
+  await fetch('/api/webauthn/passkeys/' + encodeURIComponent(id), {method: 'DELETE'});
+  loadPasskeys();
+}
+
+async function addPasskey(){
+  const hint = document.getElementById('passkeyHint');
+  if(!window.PublicKeyCredential){
+    hint.textContent = '当前浏览器不支持 Passkey';
+    return;
+  }
+  const name = prompt('给这个 Passkey 起个名字（例如：我的 MacBook）', '') || '未命名 Passkey';
+  hint.textContent = '等待设备验证…';
+  try{
+    const optRes = await fetch('/api/webauthn/register/options');
+    const options = await optRes.json();
+    if(!optRes.ok){ hint.textContent = options.error || '获取注册选项失败'; return; }
+
+    options.challenge = base64urlToBuffer(options.challenge);
+    options.user.id = base64urlToBuffer(options.user.id);
+    if(options.excludeCredentials){
+      options.excludeCredentials = options.excludeCredentials.map(c => ({...c, id: base64urlToBuffer(c.id)}));
+    }
+
+    const cred = await navigator.credentials.create({publicKey: options});
+    const credential = {
+      id: cred.id,
+      rawId: bufferToBase64url(cred.rawId),
+      type: cred.type,
+      response: {
+        clientDataJSON: bufferToBase64url(cred.response.clientDataJSON),
+        attestationObject: bufferToBase64url(cred.response.attestationObject),
+      },
+      clientExtensionResults: cred.getClientExtensionResults(),
+    };
+
+    const verifyRes = await fetch('/api/webauthn/register/verify', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({credential, name}),
+    });
+    const result = await verifyRes.json();
+    if(!verifyRes.ok){ hint.textContent = result.error || '注册失败'; return; }
+    hint.textContent = '添加成功 ✓';
+    loadPasskeys();
+  }catch(err){
+    hint.textContent = '添加失败：' + err;
+  }
 }
 
 async function load(){
@@ -433,6 +527,7 @@ async function deleteHost(id){
 
 load();
 loadAgentHosts();
+loadPasskeys();
 </script>
 </body>
 </html>
