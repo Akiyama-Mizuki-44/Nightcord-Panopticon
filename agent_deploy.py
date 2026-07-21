@@ -83,7 +83,7 @@ def deploy_agent(ip, port, ssh_user, password, report_url, shared_secret, log=No
             sftp.close()
 
         emit("创建虚拟环境并安装依赖（可能要一会儿）...")
-        _run(ssh, f"python3 -m venv {remote_dir}/.venv", emit, timeout=120)
+        _ensure_venv(ssh, remote_dir, password, is_root, emit)
         _run(
             ssh,
             f"{remote_dir}/.venv/bin/pip install --quiet --disable-pip-version-check "
@@ -134,11 +134,47 @@ def _run(ssh, cmd, emit, timeout=30, check=True):
     err = stderr.read().decode("utf-8", "replace")
     exit_code = stdout.channel.recv_exit_status()
     if check and exit_code != 0:
+        # 很多工具（比如 venv 模块报"缺 ensurepip"）把诊断信息写到 stdout 而不是 stderr，
+        # 只看 stderr 经常啥都捞不着，日志停在"命令失败"就没下文了——两边都拿，stderr 优先。
+        detail = (err.strip() or out.strip())[:400]
         emit(f"  ! 命令失败（exit {exit_code}）：{cmd[:80]}")
-        if err.strip():
-            emit(f"    {err.strip()[:400]}")
-        raise AgentDeployError(f"远端命令执行失败：{cmd[:60]}（exit {exit_code}）\n{err.strip()[:300]}")
+        if detail:
+            emit(f"    {detail}")
+        raise AgentDeployError(f"远端命令执行失败：{cmd[:60]}（exit {exit_code}）\n{detail[:300]}")
     return out
+
+
+def _ensure_venv(ssh, remote_dir, password, is_root, emit):
+    """
+    建虚拟环境最常见的坑：Debian/Ubuntu 系统 python3 自带但 venv 模块依赖的 ensurepip
+    在独立的 python3-venv 包里，没装的话 `python3 -m venv` 直接 exit 1。
+    能自动装就自动装、装完重试一次，装不了（非 apt 系统 / 没权限）再把原始报错抛出去，
+    好过卡在一句"命令失败"让人自己上服务器排查。
+    """
+    venv_cmd = f"python3 -m venv {remote_dir}/.venv"
+    try:
+        _run(ssh, venv_cmd, emit, timeout=120)
+        return
+    except AgentDeployError as e:
+        msg = str(e)
+        if not any(s in msg for s in ("ensurepip", "python3-venv", "No module named venv")):
+            raise
+
+    emit("检测到系统缺少 python3-venv（Debian/Ubuntu 常见），尝试自动安装 ...")
+    try:
+        # 非 root 账号走 sudo -S 时，sudo 只包住紧跟在后面的那一个命令，
+        # 用 bash -c 把 update && install 揉成一条命令，两步才能一起被 sudo 到。
+        _run_privileged(
+            ssh, "bash -c 'apt-get update -qq && apt-get install -y python3-venv'",
+            password, is_root, emit, timeout=180,
+        )
+    except AgentDeployError as e:
+        raise AgentDeployError(
+            "缺少 python3-venv 且自动安装失败（可能不是 apt 系发行版，或者这个账号没有 sudo 权限）。"
+            f"去目标机器上手动执行 `sudo apt install python3-venv` 后重试一键安装。\n{e}"
+        )
+    emit("python3-venv 安装完成，重新创建虚拟环境 ...")
+    _run(ssh, venv_cmd, emit, timeout=120)
 
 
 def _run_privileged(ssh, cmd, password, is_root, emit, timeout=30):
