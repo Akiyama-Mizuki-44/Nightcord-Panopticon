@@ -7,13 +7,15 @@
 然后浏览器打开 http://127.0.0.1:1810
 """
 import hmac
+import json
 import os
+import queue
 import secrets
 import threading
 import time
 import yaml
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from flask import Flask, jsonify, request, send_from_directory, Response
+from flask import Flask, jsonify, request, send_from_directory, Response, stream_with_context
 from werkzeug.security import check_password_hash
 
 from bt_client import BTClient
@@ -38,6 +40,7 @@ _cache = {"data": None, "ts": 0}
 CACHE_TTL = 10  # 秒
 
 ALERT_CHECK_INTERVAL = 60  # 秒，后台告警巡检间隔（与前端是否打开无关）
+AGENT_STALE_SECONDS = 180  # 秒，青源 agent 超过这么久没上报就不当它在线（默认上报间隔 60s，留够 3 倍余量）
 METRICS_PRUNE_INTERVAL = 3600  # 秒，自建监控 agent 历史数据的清理巡检间隔
 METRICS_REPORT_PATH = "/api/metrics/report"
 QINGYUAN_VERSION = "8.16-beta"  # 青源（自建系统指标监控架构）版本号，见 QINGYUAN.zh-CN.md
@@ -138,7 +141,45 @@ def fetch_all():
                          "online": False, "error": str(e), "kind": "nightcord-status", "targets": []}
         results.append(ns_result)
 
+    _merge_qingyuan(results)
     return results
+
+
+def _merge_qingyuan(results):
+    """
+    把青源（自建 agent）最新上报的数据叠加进 fetch_all() 的结果里：
+    - 面板名跟某个宝塔面板对得上：把青源数据挂在同一张卡片上（同名机器装了两边），
+      前端展示时青源数据优先（本机 agent 直采，比宝塔面板 API 转发的更实时更准）。
+    - 面板名对不上任何宝塔面板：说明这台机器只装了青源，没有对应的宝塔面板，
+      单独给它造一张卡片，否则它在主看板上永远不可见（只能去设置页的"已部署 agent"列表里找）。
+    """
+    by_name = {r.get("name"): r for r in results}
+    since_ts = time.time() - AGENT_STALE_SECONDS
+    for panel_name in metrics_store.list_active_panels(since_ts):
+        sample = metrics_store.get_latest(panel_name)
+        if not sample:
+            continue
+        ip = metrics_store.get_ip(panel_name)
+        qingyuan = {
+            "cpu": sample.get("cpu"),
+            "mem": sample.get("mem"),
+            "disk": sample.get("disk"),
+            "ts": sample.get("ts"),
+            "ip_internal": ip.get("ip_internal"),
+            "ip_external": ip.get("ip_external"),
+        }
+        existing = by_name.get(panel_name)
+        if existing is not None:
+            existing["qingyuan"] = qingyuan
+        else:
+            results.append({
+                "name": panel_name,
+                "url": None,
+                "online": sample.get("ts", 0) >= since_ts,
+                "error": None,
+                "kind": "qingyuan-only",
+                "qingyuan": qingyuan,
+            })
 
 
 @app.route("/api/status")
@@ -279,7 +320,13 @@ def _ensure_metrics_agent_secret(cfg):
 
 
 def _deploy_and_report(ip, port, ssh_user, password, remember):
-    """一键装 agent 的公共逻辑，POST /api/agent/deploy 和 .../redeploy 都走这里。"""
+    """
+    一键装 agent 的公共逻辑，POST /api/agent/deploy 和 .../redeploy 都走这里。
+    装一次动辄一两分钟（建虚拟环境、装依赖），干等着容易让人怀疑是不是卡死了，
+    所以用 NDJSON 流式返回：deploy_agent() 每 emit 一行日志就立刻推给前端，
+    而不是攒到最后一次性甩一大段。SSH 部署本身在后台线程里跑，主线程负责把
+    队列里的日志行 yield 出去，deploy_agent() 结束后队列收到 "done" 哨兵才收尾。
+    """
     try:
         cfg = load_config()
     except RuntimeError:
@@ -292,18 +339,45 @@ def _deploy_and_report(ip, port, ssh_user, password, remember):
     report_url = f"{request.scheme}://{request.host}{METRICS_REPORT_PATH}"
     shared_secret = cfg["metrics_agent"]["shared_secret"]
 
-    log_lines = []
-    try:
-        panel_name = deploy_agent(ip, port, ssh_user, password, report_url, shared_secret, log=log_lines.append)
-    except AgentDeployError as e:
-        return jsonify({"ok": False, "error": str(e), "log": log_lines}), 400
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"未预期的错误：{e}", "log": log_lines}), 500
+    q = queue.Queue()
+    result = {}
 
-    if remember:
-        agent_hosts.save_host(CONFIG_PATH, ip, port, ssh_user, password, panel_name)
-    _cache["data"] = None  # 新 agent 上线后下一次 /api/status 应该重新拉取一次
-    return jsonify({"ok": True, "panel_name": panel_name, "log": log_lines})
+    def worker():
+        try:
+            panel_name = deploy_agent(
+                ip, port, ssh_user, password, report_url, shared_secret,
+                log=lambda line: q.put(("log", line)),
+            )
+            result["ok"], result["panel_name"] = True, panel_name
+        except AgentDeployError as e:
+            result["ok"], result["error"] = False, str(e)
+        except Exception as e:
+            result["ok"], result["error"] = False, f"未预期的错误：{e}"
+        finally:
+            q.put(("done", None))
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    def generate():
+        while True:
+            kind, payload = q.get()
+            if kind == "log":
+                yield json.dumps({"type": "log", "line": payload}, ensure_ascii=False) + "\n"
+                continue
+            if result.get("ok"):
+                if remember:
+                    agent_hosts.save_host(CONFIG_PATH, ip, port, ssh_user, password, result["panel_name"])
+                _cache["data"] = None  # 新 agent 上线后下一次 /api/status 应该重新拉取一次
+                yield json.dumps(
+                    {"type": "done", "ok": True, "panel_name": result["panel_name"]}, ensure_ascii=False
+                ) + "\n"
+            else:
+                yield json.dumps(
+                    {"type": "done", "ok": False, "error": result.get("error", "未知错误")}, ensure_ascii=False
+                ) + "\n"
+            return
+
+    return Response(stream_with_context(generate()), mimetype="application/x-ndjson")
 
 
 @app.route("/api/agent/deploy", methods=["POST"])
@@ -367,10 +441,9 @@ def background_alert_loop():
                 for alert in evaluate_alerts(panel_result, thresholds):
                     notifier.notify(alert)
 
-            # 青源（自建 agent）上报的机器不在 fetch_all() 的面板列表里，要单独按最新样本判断阈值。
+            # 青源（自建 agent）上报的机器不一定跟宝塔面板重名，要单独按最新样本判断阈值。
             # 只看最近还在上报的面板，避免给早就下线/卸载的 agent 反复报警。
-            stale_after = ALERT_CHECK_INTERVAL * 3
-            for panel_name in metrics_store.list_active_panels(time.time() - stale_after):
+            for panel_name in metrics_store.list_active_panels(time.time() - AGENT_STALE_SECONDS):
                 sample = metrics_store.get_latest(panel_name)
                 ip = metrics_store.get_ip(panel_name)
                 for alert in evaluate_agent_alerts(panel_name, sample, thresholds, ip["ip_external"], ip["ip_internal"]):

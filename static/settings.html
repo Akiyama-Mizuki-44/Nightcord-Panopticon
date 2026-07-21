@@ -347,16 +347,54 @@ async function loadAgentHosts(){
   });
 }
 
-function showDeployResult(ok, data, msg, log){
-  msg.className = ok ? 'ok' : 'err';
-  msg.textContent = ok
-    ? `安装成功 ✓（面板名：${data.panel_name}）`
-    : ('安装失败：' + (data.error || '未知错误'));
-  if(data.log && data.log.length){
-    log.style.display = 'block';
-    log.textContent = data.log.join('\n');
-  } else {
-    log.style.display = 'none';
+async function streamDeploy(url, options, msg, log, onDone){
+  // /api/agent/deploy 和 .../redeploy 返回的是 NDJSON 流（一行一个 JSON），
+  // 装的过程（建虚拟环境、装依赖）动辄一两分钟，边跑边把日志行 push 过来，
+  // 不用像以前那样干等到最后才看到一大坨文字。
+  msg.className = '';
+  msg.textContent = '安装中，可能需要一两分钟…';
+  log.style.display = 'block';
+  log.textContent = '';
+  try{
+    const res = await fetch(url, options);
+    if(!res.ok || !res.body){
+      const data = await res.json().catch(() => ({}));
+      msg.className = 'err';
+      msg.textContent = '安装失败：' + (data.error || `HTTP ${res.status}`);
+      log.style.display = 'none';
+      return;
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while(true){
+      const {value, done} = await reader.read();
+      if(done) break;
+      buf += decoder.decode(value, {stream: true});
+      let idx;
+      while((idx = buf.indexOf('\n')) >= 0){
+        const line = buf.slice(0, idx);
+        buf = buf.slice(idx + 1);
+        if(!line.trim()) continue;
+        const evt = JSON.parse(line);
+        if(evt.type === 'log'){
+          log.textContent += evt.line + '\n';
+          log.scrollTop = log.scrollHeight;
+        } else if(evt.type === 'done'){
+          if(evt.ok){
+            msg.className = 'ok';
+            msg.textContent = `安装成功 ✓（面板名：${evt.panel_name}）`;
+            if(onDone) await onDone(evt);
+          } else {
+            msg.className = 'err';
+            msg.textContent = '安装失败：' + (evt.error || '未知错误');
+          }
+        }
+      }
+    }
+  }catch(e){
+    msg.className = 'err';
+    msg.textContent = '请求失败：' + e;
   }
 }
 
@@ -388,41 +426,20 @@ async function deployAgent(){
     msg.textContent = '服务器 IP 和密码不能为空';
     return;
   }
-  msg.className = '';
-  msg.textContent = '安装中，可能需要一两分钟…';
-  log.style.display = 'none';
-  try{
-    const res = await fetch('/api/agent/deploy', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ip, port, ssh_user, password, remember}),
-    });
-    const data = await res.json();
-    showDeployResult(res.ok && data.ok, data, msg, log);
-    if(res.ok && data.ok){
-      document.getElementById('deployPassword').value = '';
-      await loadAgentHosts();
-    }
-  }catch(e){
-    msg.className = 'err';
-    msg.textContent = '请求失败：' + e;
-  }
+  await streamDeploy('/api/agent/deploy', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ip, port, ssh_user, password, remember}),
+  }, msg, log, async () => {
+    document.getElementById('deployPassword').value = '';
+    await loadAgentHosts();
+  });
 }
 
 async function redeployHost(id){
   const msg = document.getElementById('deployMsg');
   const log = document.getElementById('deployLog');
-  msg.className = '';
-  msg.textContent = '重新安装中，可能需要一两分钟…';
-  log.style.display = 'none';
-  try{
-    const res = await fetch(`/api/agent/hosts/${encodeURIComponent(id)}/redeploy`, {method: 'POST'});
-    const data = await res.json();
-    showDeployResult(res.ok && data.ok, data, msg, log);
-  }catch(e){
-    msg.className = 'err';
-    msg.textContent = '请求失败：' + e;
-  }
+  await streamDeploy(`/api/agent/hosts/${encodeURIComponent(id)}/redeploy`, {method: 'POST'}, msg, log);
 }
 
 async function deleteHost(id){

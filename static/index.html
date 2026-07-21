@@ -86,19 +86,32 @@ function barClass(p){
   return '';
 }
 
-function renderSystem(sys, net){
-  if(!sys && !net) return '<div class="err">无数据</div>';
+const QY_TAG = '<span style="color:var(--muted);font-size:10px;margin-left:4px">青源实时</span>';
+
+function renderSystem(sys, net, qingyuan){
+  if(!sys && !net && !qingyuan) return '<div class="err">无数据</div>';
   let html = '';
   if(sys){
-    const memUsed = sys.MemRealUsed ?? sys.memRealUsed;
-    const memTotal = sys.MemTotal ?? sys.memTotal;
-    const cpuUsed = sys.cpuRealUsed ?? sys.CpuRealUsed ?? (net && net.cpu ? net.cpu[0] : undefined);
     html += `<div class="row"><span class="k">系统</span><span>${sys.system ?? '-'}</span></div>`;
     html += `<div class="row"><span class="k">运行时长</span><span>${sys.time ?? '-'}</span></div>`;
+  }
+  // 青源 agent 是本机直采，比宝塔面板 API 转发的数据更实时，两边都有时优先用青源的 CPU/内存
+  if(qingyuan && qingyuan.cpu !== undefined && qingyuan.cpu !== null){
+    html += `<div class="row"><span class="k">CPU${QY_TAG}</span><span>${Number(qingyuan.cpu).toFixed(1)}%</span></div>
+      <div class="bar ${barClass(qingyuan.cpu)}"><span style="width:${Math.min(100,qingyuan.cpu)}%"></span></div>`;
+  } else if(sys){
+    const cpuUsed = sys.cpuRealUsed ?? sys.CpuRealUsed ?? (net && net.cpu ? net.cpu[0] : undefined);
     if(cpuUsed !== undefined){
       html += `<div class="row"><span class="k">CPU</span><span>${Number(cpuUsed).toFixed(1)}%</span></div>
         <div class="bar ${barClass(cpuUsed)}"><span style="width:${Math.min(100,cpuUsed)}%"></span></div>`;
     }
+  }
+  if(qingyuan && qingyuan.mem !== undefined && qingyuan.mem !== null){
+    html += `<div class="row"><span class="k">内存${QY_TAG}</span><span>${Number(qingyuan.mem).toFixed(1)}%</span></div>
+      <div class="bar ${barClass(qingyuan.mem)}"><span style="width:${Math.min(100,qingyuan.mem)}%"></span></div>`;
+  } else if(sys){
+    const memUsed = sys.MemRealUsed ?? sys.memRealUsed;
+    const memTotal = sys.MemTotal ?? sys.memTotal;
     if(memUsed !== undefined && memTotal){
       const p = pct(memUsed, memTotal);
       html += `<div class="row"><span class="k">内存</span><span>${memUsed}G / ${memTotal}G</span></div>
@@ -115,16 +128,40 @@ function renderSystem(sys, net){
   return html || '<div class="err">无数据</div>';
 }
 
-function renderDisk(disk){
-  if(!disk || !disk.length) return '<div class="err">无数据</div>';
+function renderIp(p, qingyuan){
+  // 内网 IP 只有本机 agent（青源）拿得到；外网 IP 宝塔面板也能靠 url 解析出一个参考值
+  const ext = (qingyuan && qingyuan.ip_external) || p.ip_external;
+  const int_ = qingyuan && qingyuan.ip_internal;
+  if(!ext && !int_) return '';
+  const parts = [];
+  if(ext) parts.push(`${ext}(外)`);
+  if(int_) parts.push(`${int_}(内)`);
+  return `<div class="row"><span class="k">IP 地址</span><span>${parts.join(' ')}</span></div>`;
+}
+
+function renderDisk(disk, qingyuanDiskPct){
+  if((!disk || !disk.length) && qingyuanDiskPct === undefined) return '<div class="err">无数据</div>';
   let html = '<table>';
-  disk.forEach(d=>{
+  let rootShown = false;
+  (disk || []).forEach(d=>{
     const size = d.size || [];
     const [total, used, avail, percentStr] = size;
-    const p = parseInt(percentStr) || 0;
+    let p = parseInt(percentStr) || 0;
+    let label = percentStr || (p+'%');
+    // 挂载目录【/】两边都有数据时，青源直采的更准，覆盖宝塔面板的展示值
+    if(d.path === '/' && qingyuanDiskPct !== undefined && qingyuanDiskPct !== null){
+      p = qingyuanDiskPct;
+      label = `${p.toFixed(1)}%${QY_TAG}`;
+      rootShown = true;
+    }
     html += `<tr><td>${d.path||'-'}</td><td>${used||'-'}/${total||'-'}</td>
-      <td><span class="badge ${p>=85?'bad':'ok'}">${percentStr||p+'%'}</span></td></tr>`;
+      <td><span class="badge ${p>=85?'bad':'ok'}">${label}</span></td></tr>`;
   });
+  if(!rootShown && qingyuanDiskPct !== undefined && qingyuanDiskPct !== null){
+    const p = qingyuanDiskPct;
+    html += `<tr><td>/</td><td>-</td>
+      <td><span class="badge ${p>=85?'bad':'ok'}">${p.toFixed(1)}%${QY_TAG}</span></td></tr>`;
+  }
   html += '</table>';
   return html;
 }
@@ -259,15 +296,23 @@ function renderCard(p, idx){
   const online = p.online !== false;
   const dot = online ? 'ok' : 'bad';
   const member = NIGHTCORD_MEMBERS[idx % NIGHTCORD_MEMBERS.length];
+  const qingyuan = p.qingyuan;
   let body = '';
   if(!online){
-    body += `<div class="err">${p.error || '无法连接该面板'}</div>`;
+    body += `<div class="err">${p.error || (p.kind === 'qingyuan-only' ? '青源 agent 已超过 3 分钟没有上报' : '无法连接该面板')}</div>`;
   }
   if(p.kind === 'nightcord-status'){
     body += `<div class="section-title">监控目标</div>${renderNightcordStatus(p)}`;
+  } else if(p.kind === 'qingyuan-only'){
+    // 只装了青源、没配对应宝塔面板的机器：没有 sites/databases 这些宝塔才有的数据，卡片简化展示
+    body += `<div class="section-title">系统状态</div>${renderSystem(null, null, qingyuan)}`;
+    body += renderIp(p, qingyuan);
+    body += `<div class="section-title">磁盘</div>${renderDisk(null, qingyuan ? qingyuan.disk : undefined)}`;
+    body += `<div id="mtx-${metricsSlug(p.name || '')}"></div>`;
   } else {
-    body += `<div class="section-title">系统状态</div>${renderSystem(p.system, p.network)}`;
-    body += `<div class="section-title">磁盘</div>${renderDisk(p.disk)}`;
+    body += `<div class="section-title">系统状态</div>${renderSystem(p.system, p.network, qingyuan)}`;
+    body += renderIp(p, qingyuan);
+    body += `<div class="section-title">磁盘</div>${renderDisk(p.disk, qingyuan ? qingyuan.disk : undefined)}`;
     body += `<div class="section-title">网站</div>${renderSites(p.sites)}`;
     body += `<div class="section-title">数据库</div>${renderDatabases(p.databases)}`;
     body += `<div id="mtx-${metricsSlug(p.name || '')}"></div>`;
@@ -277,7 +322,7 @@ function renderCard(p, idx){
     <h2><span class="dot ${dot}"></span>${p.name || '未命名面板'}
       <span style="margin-left:auto;font-size:10px;color:${member.color};font-weight:400">♪ ${member.name}</span>
     </h2>
-    <div class="url">${p.url || ''}</div>
+    <div class="url">${p.url || (p.kind === 'qingyuan-only' ? '仅青源 agent，未配置宝塔面板' : '')}</div>
     ${body}
   </div>`;
 }

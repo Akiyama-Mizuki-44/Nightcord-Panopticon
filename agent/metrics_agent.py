@@ -94,28 +94,39 @@ def main():
     ip_external = get_external_ip() if report_ip else None
     last_external_ip_check = time.time()
 
+    def report_once():
+        nonlocal prev_net, prev_ts, ip_internal, ip_external, last_external_ip_check
+        sample, prev_net, prev_ts = collect(prev_net, prev_ts)
+        sample["panel"] = panel_name
+        if report_ip:
+            if time.time() - last_external_ip_check >= EXTERNAL_IP_REFRESH_SECONDS or not ip_external:
+                ip_external = get_external_ip()
+                last_external_ip_check = time.time()
+            if not ip_internal:
+                ip_internal = get_internal_ip()
+            sample["ip_internal"] = ip_internal
+            sample["ip_external"] = ip_external
+        resp = requests.post(
+            report_url,
+            json=sample,
+            headers={"X-Metrics-Secret": shared_secret},
+            timeout=8,
+        )
+        if resp.status_code != 200:
+            print(f"[metrics_agent] 上报失败: HTTP {resp.status_code} {resp.text}")
+
     print(f"[metrics_agent] 启动，panel={panel_name}，每 {interval_seconds}s 上报一次到 {report_url}")
+    try:
+        # 一键安装那边想装完就能在主看板立刻看到卡片，所以启动后马上报一次，
+        # 不用等第一个 interval_seconds（默认 60s）过去才有数据。
+        report_once()
+    except Exception as e:
+        print(f"[metrics_agent] 首次上报出错: {e}")
+
     while True:
         time.sleep(interval_seconds)
         try:
-            sample, prev_net, prev_ts = collect(prev_net, prev_ts)
-            sample["panel"] = panel_name
-            if report_ip:
-                if time.time() - last_external_ip_check >= EXTERNAL_IP_REFRESH_SECONDS or not ip_external:
-                    ip_external = get_external_ip()
-                    last_external_ip_check = time.time()
-                if not ip_internal:
-                    ip_internal = get_internal_ip()
-                sample["ip_internal"] = ip_internal
-                sample["ip_external"] = ip_external
-            resp = requests.post(
-                report_url,
-                json=sample,
-                headers={"X-Metrics-Secret": shared_secret},
-                timeout=8,
-            )
-            if resp.status_code != 200:
-                print(f"[metrics_agent] 上报失败: HTTP {resp.status_code} {resp.text}")
+            report_once()
         except Exception as e:
             # 网络抖动/Panopticon 临时不可达都不该让 agent 退出，下一轮再试
             print(f"[metrics_agent] 上报出错: {e}")
