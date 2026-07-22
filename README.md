@@ -9,15 +9,31 @@ database info across multiple BT Panel (宝塔面板) servers. A backend proxy s
 each panel's API on your behalf, avoiding the CORS / IP-whitelist issues you'd hit calling
 the BT Panel API directly from the browser.
 
+Beyond BT Panel, it also runs **青源 (Qingyuan)**: an optional self-hosted metrics agent you
+one-click-deploy (over SSH) to any Linux box — panel or not — for real per-mount disk usage,
+CPU/memory, network throughput, and threshold-based alerts (Feishu card / email). A separate
+lightweight reporter can feed ESXi hosts into the same pipeline via vSphere API without
+installing anything on the hypervisor itself. See [QINGYUAN.zh-CN.md](QINGYUAN.zh-CN.md) and
+[ESXI_QINGYUAN_MONITORING.zh-CN.md](ESXI_QINGYUAN_MONITORING.zh-CN.md) (Chinese only, commands
+are copy-pasteable) for the full picture.
+
 ## Architecture
 
 ```
 Browser <-- HTTP --> Flask backend (app.py) <-- signed requests --> each BT Panel API
+                                 │
+                                 ├─ SQLite (metrics_store.py) <-- push reports -- Qingyuan agents
+                                 │                                               (one per host)
+                                 └─ Feishu card / email alerts (notifier.py)
 ```
 
 - `bt_client.py`: implements BT Panel's request-signing scheme (`md5(request_time + md5(api_sk))`) and wraps the common endpoints.
-- `app.py`: Flask service that reads the panel list from `config.yaml`, fetches all panels concurrently, exposes `/api/status`, and serves the frontend.
-- `static/index.html`: single-page dashboard, polls `/api/status` every 15s, and renders CPU/memory/disk, site list, database count, etc.
+- `app.py`: Flask service that reads the panel list from `config.yaml`, fetches all panels concurrently, exposes `/api/status`, merges in Qingyuan data, and serves the frontend.
+- `static/index.html`: single-page dashboard, polls `/api/status` every 15s, and renders CPU/memory/disk (per mount point), site list, database count, IP addresses, and history trend charts.
+- `agent/metrics_agent.py` + `agent_deploy.py`: the Qingyuan agent itself, and the one-click SSH installer driven from the settings page.
+- `esxi_reporter/esxi_metrics_reporter.py`: standalone script (runs elsewhere, e.g. on a box that already talks to vSphere) that feeds ESXi host metrics into the same `/api/metrics/report` endpoint.
+- `notifier.py`: threshold evaluation + edge-triggered Feishu/email alerts (fires once when a problem starts, not on every check cycle).
+- `webauthn_manager.py` + `static/login.html`: session-based login with optional Passkey (WebAuthn) support alongside the password.
 
 ## Endpoints in use
 
@@ -112,8 +128,10 @@ API traffic between Panopticon and every panel also stays inside the WireGuard t
 
 ### Login + brute-force protection on Panopticon itself
 
-`app.py` has built-in HTTP Basic Auth plus per-IP failure lockout, disabled by default
-(`dashboard_auth.enabled: false`). **Turn it on before exposing this publicly**:
+`app.py` gates every route behind a session-based login (password, with optional Passkey /
+WebAuthn as a second way in — fingerprint, Face ID, security key), plus per-IP failure lockout.
+Disabled by default (`dashboard_auth.enabled: false`). **Turn it on before exposing this
+publicly**:
 
 ```bash
 python gen_password_hash.py "your password"   # generates a hash — never put a plaintext password in config.yaml
@@ -130,18 +148,21 @@ dashboard_auth:
   lockout_seconds: 900   # lockout duration in seconds, default 15 minutes
 ```
 
-Behavior: no/invalid credentials → 401. Once one IP accumulates `max_attempts` failures, every
-subsequent request from it — even with the correct password — gets a 429 until the lockout window
-passes. Lockout state lives in memory and resets when the dashboard restarts.
+Behavior: no/invalid credentials → redirected to `/login` (or `401` for API calls). Once one IP
+accumulates `max_attempts` failures, every subsequent request from it — even with the correct
+password — gets a `429` until the lockout window passes. Lockout state lives in memory and resets
+when the dashboard restarts. Passkeys are registered from `/settings` after your first password
+login, and require HTTPS (`localhost`/`127.0.0.1` excluded) since WebAuthn won't work over plain
+HTTP otherwise.
 
-If you only ever access Panopticon from inside WireGuard and don't plan to expose it publicly, leave `enabled: false` and skip the password prompt entirely.
+If you only ever access Panopticon from inside WireGuard and don't plan to expose it publicly, leave `enabled: false` and skip the login prompt entirely.
 
 ## Ideas for extension
 
 - SSL expiry alerts: call `/site?action=GetSSL&siteName=xxx` (verify the latest parameter names against BT's official PDF).
 - Security alerts: panel logs / firewall block stats.
-- Historical trend charts: persist `/api/status` samples into SQLite and plot with Chart.js.
-- Push notifications (DingTalk / WeCom / Server酱) on thresholds like CPU>90%, disk>85%, or a panel going offline.
+- Windows agent support: `agent/metrics_agent.py` already uses cross-platform `psutil`, but the one-click installer (`agent_deploy.py`) is SSH + systemd only, and the disk collector assumes POSIX mount points.
+- Network throughput for the ESXi reporter: currently reports `0`, since it needs `PerformanceManager` counters instead of the simpler `quickStats` fields used for CPU/memory (see the "known limitations" section in [ESXI_QINGYUAN_MONITORING.zh-CN.md](ESXI_QINGYUAN_MONITORING.zh-CN.md)).
 
 ## Note
 
