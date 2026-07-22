@@ -7,15 +7,29 @@
 自建的轻量级全局监控面板，聚合多台宝塔（BT Panel）服务器的状态、网站、数据库信息，
 用后端代理调用各面板 API（避免浏览器直连宝塔 API 的 CORS / IP 白名单限制）。
 
+除了宝塔面板，还内置了 **青源（Qingyuan）**：一个可选的自建监控 agent，一键 SSH 部署到任意
+Linux 机器（不管有没有装宝塔面板）就能拿到真实的分挂载点磁盘用量、CPU/内存、网络吞吐，超阈值
+还能推飞书卡片消息 / 邮件告警。另外还有一个独立的轻量上报脚本，能通过 vSphere API 把 ESXi
+宿主机的指标接进同一套流水线，不用在 ESXi 本机装任何东西。完整介绍见
+[QINGYUAN.zh-CN.md](QINGYUAN.zh-CN.md) 和 [ESXI_QINGYUAN_MONITORING.zh-CN.md](ESXI_QINGYUAN_MONITORING.zh-CN.md)。
+
 ## 架构
 
 ```
 浏览器 <-- HTTP --> Flask 后端 (app.py) <-- 签名请求 --> 各台宝塔面板 API
+                            │
+                            ├─ SQLite (metrics_store.py) <-- 上报 -- 青源 agent（每台机器一个）
+                            │
+                            └─ 飞书卡片 / 邮件告警 (notifier.py)
 ```
 
 - `bt_client.py`：封装宝塔 API 的签名算法（`md5(request_time + md5(api_sk))`）与常用接口调用。
-- `app.py`：Flask 服务，读取 `config.yaml` 中配置的多台面板，并发拉取数据，暴露 `/api/status`，并托管前端页面。
-- `static/index.html`：单页 Dashboard，每 15 秒轮询一次 `/api/status`，展示 CPU/内存/磁盘、站点列表、数据库数量等。
+- `app.py`：Flask 服务，读取 `config.yaml` 中配置的多台面板，并发拉取数据，暴露 `/api/status`，合并青源数据，并托管前端页面。
+- `static/index.html`：单页 Dashboard，每 15 秒轮询一次 `/api/status`，展示 CPU/内存/磁盘（分挂载点）、站点列表、数据库数量、IP 地址、历史趋势图等。
+- `agent/metrics_agent.py` + `agent_deploy.py`：青源 agent 本体，以及设置页驱动的一键 SSH 安装器。
+- `esxi_reporter/esxi_metrics_reporter.py`：独立脚本（跑在别的机器上，比如已经能连 vSphere 的那台），把 ESXi 宿主机指标喂进同一个 `/api/metrics/report` 接口。
+- `notifier.py`：阈值判断 + 边缘触发的飞书/邮件告警（问题刚发生时发一次，不会每轮巡检都重发）。
+- `webauthn_manager.py` + `static/login.html`：session 登录，密码之外还支持 Passkey（WebAuthn）。
 
 ## 已接入的接口
 
@@ -107,7 +121,8 @@ python app.py
 
 ### Panopticon 自身的登录验证 + 防暴力破解
 
-`app.py` 内置了一层 HTTP Basic Auth，外加按来源 IP 的失败次数锁定，默认关闭（`dashboard_auth.enabled: false`），
+`app.py` 给所有路由挡了一层 session 登录（密码，外加可选的 Passkey / WebAuthn 作为第二种登录方式——
+指纹、Face ID、安全密钥），加上按来源 IP 的失败次数锁定，默认关闭（`dashboard_auth.enabled: false`），
 **只要打算公网暴露就必须打开**：
 
 ```bash
@@ -125,17 +140,19 @@ dashboard_auth:
   lockout_seconds: 900   # 锁定时长（秒），默认 15 分钟
 ```
 
-行为：没有认证头或用户名密码不对 → 401；同一 IP 累计失败次数达到 `max_attempts` → 后续请求（哪怕密码是对的）
-都会被 429 拒绝，直到锁定期过去。锁定状态存在内存里，重启 Dashboard 会重置。
+行为：没登录或用户名密码不对 → 跳转 `/login`（API 请求则是 `401`）；同一 IP 累计失败次数达到
+`max_attempts` → 后续请求（哪怕密码是对的）都会被 `429` 拒绝，直到锁定期过去。锁定状态存在内存里，
+重启 Dashboard 会重置。Passkey 要先用密码登录一次，再去 `/settings` 里添加，且需要 HTTPS 访问
+（`localhost`/`127.0.0.1` 除外）——WebAuthn 在普通 HTTP 下用不了。
 
-如果你只打算在 WireGuard 内网访问 Panopticon（不公网暴露），`enabled` 保持 `false` 即可，省掉每次输密码的麻烦。
+如果你只打算在 WireGuard 内网访问 Panopticon（不公网暴露），`enabled` 保持 `false` 即可，省掉每次登录的麻烦。
 
 ## 可扩展方向
 
 - SSL 证书到期提醒：调用 `/site?action=GetSSL&siteName=xxx`（需按官方 PDF 核对最新参数名）。
 - 安全告警：面板日志 / 防火墙拦截接口。
-- 历史趋势图：把 `/api/status` 的采样结果写入 SQLite，用 Chart.js 画曲线。
-- 钉钉 / 企业微信 / Server 酱告警推送，触发条件如 CPU>90%、磁盘>85%、面板离线等。
+- Windows agent 支持：`agent/metrics_agent.py` 用的 `psutil` 本身跨平台，但一键安装器（`agent_deploy.py`）是 SSH + systemd 那一套，磁盘采集也假设了 POSIX 挂载点，都还没适配 Windows。
+- ESXi 上报脚本的网络吞吐：现在固定占位成 0，要补全需要查 `PerformanceManager` 性能计数器，比 CPU/内存用的 `quickStats` 麻烦不少（见 [ESXI_QINGYUAN_MONITORING.zh-CN.md](ESXI_QINGYUAN_MONITORING.zh-CN.md) 的"已知限制"）。
 
 ## 备注
 
