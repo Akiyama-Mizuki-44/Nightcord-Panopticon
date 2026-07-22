@@ -140,31 +140,37 @@ function renderIp(p, qingyuan){
   return `<div class="row"><span class="k">IP 地址</span><span>${parts.join(' ')}</span></div>`;
 }
 
-function renderDisk(disk, qingyuanDiskPct){
-  if((!disk || !disk.length) && qingyuanDiskPct === undefined) return '<div class="err">无数据</div>';
-  let html = '<table>';
-  let rootShown = false;
+function renderDisk(disk, qingyuanDetail){
+  // 青源直采的挂载点用真实 total/used；跟宝塔报的同一个挂载点重叠时青源的更准，直接覆盖，
+  // 宝塔有但青源没报的（比如青源还没升级到能采多盘的版本）保留宝塔原样；
+  // 青源有但宝塔没有的挂载点（数据盘、宝塔压根不知道的盘）额外补一行，不再对它们视而不见。
+  const qyMap = new Map((qingyuanDetail || []).map(d => [d.path, d]));
+  const btPaths = new Set();
+  const rows = [];
+
   (disk || []).forEach(d=>{
-    const size = d.size || [];
-    const [total, used, avail, percentStr] = size;
-    let p = parseInt(percentStr) || 0;
-    let label = percentStr || (p+'%');
-    // 挂载目录【/】两边都有数据时，青源直采的更准，覆盖宝塔面板的展示值
-    if(d.path === '/' && qingyuanDiskPct !== undefined && qingyuanDiskPct !== null){
-      p = qingyuanDiskPct;
-      label = `${p.toFixed(1)}%${QY_TAG}`;
-      rootShown = true;
+    btPaths.add(d.path);
+    const qy = qyMap.get(d.path);
+    if(qy){
+      rows.push({path: d.path, usedTotal: `${fmtBytes(qy.used)}/${fmtBytes(qy.total)}`,
+        percent: qy.percent, label: `${qy.percent.toFixed(1)}%${QY_TAG}`});
+    } else {
+      const [total, used, avail, percentStr] = d.size || [];
+      const p = parseInt(percentStr) || 0;
+      rows.push({path: d.path || '-', usedTotal: `${used||'-'}/${total||'-'}`, percent: p, label: percentStr || (p+'%')});
     }
-    html += `<tr><td>${d.path||'-'}</td><td>${used||'-'}/${total||'-'}</td>
-      <td><span class="badge ${p>=85?'bad':'ok'}">${label}</span></td></tr>`;
   });
-  if(!rootShown && qingyuanDiskPct !== undefined && qingyuanDiskPct !== null){
-    const p = qingyuanDiskPct;
-    html += `<tr><td>/</td><td>-</td>
-      <td><span class="badge ${p>=85?'bad':'ok'}">${p.toFixed(1)}%${QY_TAG}</span></td></tr>`;
-  }
-  html += '</table>';
-  return html;
+  (qingyuanDetail || []).forEach(qy=>{
+    if(btPaths.has(qy.path)) return;
+    rows.push({path: qy.path, usedTotal: `${fmtBytes(qy.used)}/${fmtBytes(qy.total)}`,
+      percent: qy.percent, label: `${qy.percent.toFixed(1)}%${QY_TAG}`});
+  });
+
+  if(!rows.length) return '<div class="err">无数据</div>';
+  return '<table>' + rows.map(r =>
+    `<tr><td>${r.path}</td><td>${r.usedTotal}</td>
+      <td><span class="badge ${r.percent>=85?'bad':'ok'}">${r.label}</span></td></tr>`
+  ).join('') + '</table>';
 }
 
 function renderSites(sites){
@@ -298,6 +304,13 @@ function renderCard(p, idx){
   const dot = online ? 'ok' : 'bad';
   const member = NIGHTCORD_MEMBERS[idx % NIGHTCORD_MEMBERS.length];
   const qingyuan = p.qingyuan;
+  // 老版本青源 agent 只报单个百分比、没有 disk_detail 数组，兜底拼成一行，
+  // 用户不用先升级 agent 就不至于突然从"有磁盘数据"变成"无数据"
+  const qyDiskDetail = (qingyuan && qingyuan.disk_detail && qingyuan.disk_detail.length)
+    ? qingyuan.disk_detail
+    : (qingyuan && qingyuan.disk !== undefined && qingyuan.disk !== null
+        ? [{path: '/', total: null, used: null, percent: qingyuan.disk}]
+        : null);
   let body = '';
   if(!online){
     body += `<div class="err">${p.error || (p.kind === 'qingyuan-only' ? '青源 agent 已超过 3 分钟没有上报' : '无法连接该面板')}</div>`;
@@ -308,12 +321,12 @@ function renderCard(p, idx){
     // 只装了青源、没配对应宝塔面板的机器：没有 sites/databases 这些宝塔才有的数据，卡片简化展示
     body += `<div class="section-title">系统状态</div>${renderSystem(null, null, qingyuan)}`;
     body += renderIp(p, qingyuan);
-    body += `<div class="section-title">磁盘</div>${renderDisk(null, qingyuan ? qingyuan.disk : undefined)}`;
+    body += `<div class="section-title">磁盘</div>${renderDisk(null, qyDiskDetail)}`;
     body += `<div id="mtx-${metricsSlug(p.name || '')}"></div>`;
   } else {
     body += `<div class="section-title">系统状态</div>${renderSystem(p.system, p.network, qingyuan)}`;
     body += renderIp(p, qingyuan);
-    body += `<div class="section-title">磁盘</div>${renderDisk(p.disk, qingyuan ? qingyuan.disk : undefined)}`;
+    body += `<div class="section-title">磁盘</div>${renderDisk(p.disk, qyDiskDetail)}`;
     body += `<div class="section-title">网站</div>${renderSites(p.sites)}`;
     body += `<div class="section-title">数据库</div>${renderDatabases(p.databases)}`;
     body += `<div id="mtx-${metricsSlug(p.name || '')}"></div>`;

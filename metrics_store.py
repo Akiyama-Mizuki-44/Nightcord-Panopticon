@@ -3,6 +3,7 @@
 不额外引入依赖（sqlite3 是标准库）。一台面板一条时间序列，(panel, ts) 联合主键，
 重复上报同一秒直接覆盖而不是报错，方便 agent 端重试。
 """
+import json
 import os
 import sqlite3
 
@@ -26,6 +27,11 @@ CREATE TABLE IF NOT EXISTS agent_ip (
   panel TEXT PRIMARY KEY,
   ip_internal TEXT,
   ip_external TEXT
+);
+
+CREATE TABLE IF NOT EXISTS agent_disk_detail (
+  panel TEXT PRIMARY KEY,
+  detail_json TEXT
 );
 """
 
@@ -77,6 +83,28 @@ def get_ip(panel):
             "SELECT ip_internal, ip_external FROM agent_ip WHERE panel = ?", (panel,)
         ).fetchone()
         return dict(row) if row else {"ip_internal": None, "ip_external": None}
+
+
+def upsert_disk_detail(panel, detail):
+    """跟 IP 一样只存最新一份——每个挂载点的历史用量没必要留，卡片只需要"现在什么样"。"""
+    if not detail:
+        return
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO agent_disk_detail (panel, detail_json) VALUES (?, ?)
+            ON CONFLICT(panel) DO UPDATE SET detail_json=excluded.detail_json
+            """,
+            (panel, json.dumps(detail)),
+        )
+
+
+def get_disk_detail(panel):
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT detail_json FROM agent_disk_detail WHERE panel = ?", (panel,)
+        ).fetchone()
+        return json.loads(row["detail_json"]) if row else None
 
 
 def get_latest(panel):

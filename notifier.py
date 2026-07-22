@@ -233,10 +233,13 @@ def evaluate_alerts(panel_result: dict, thresholds: dict):
     return alerts
 
 
-def evaluate_agent_alerts(panel_name: str, sample: dict, thresholds: dict, ip_external=None, ip_internal=None):
+def evaluate_agent_alerts(panel_name: str, sample: dict, thresholds: dict,
+                           ip_external=None, ip_internal=None, disk_detail=None):
     """
     根据青源（Qingyuan）自建 agent 上报的最新一条样本 + 阈值配置，产出告警列表。
     sample 形如 metrics_store.get_latest() 的返回值：{"ts","cpu","mem","disk","net_in_kbps","net_out_kbps"}
+    disk_detail 形如 metrics_store.get_disk_detail() 的返回值：[{"path","total","used","percent"}, ...]，
+    带了就按挂载点逐个比阈值（不再只盯根分区）；没带（老版本 agent）就退回只看 sample["disk"]。
     """
     alerts = []
     if not sample:
@@ -257,6 +260,16 @@ def evaluate_agent_alerts(panel_name: str, sample: dict, thresholds: dict, ip_ex
         alerts.append(make("agent-cpu", "CPU高占用告警", f"最近一次采样机器CPU占用率为{cpu:.2f}%，高于告警值{thresholds.get('cpu',90)}%"))
     if mem is not None and mem >= thresholds.get("mem", 90):
         alerts.append(make("agent-mem", "内存高占用告警", f"最近一次采样机器内存占用率为{mem:.2f}%，高于告警值{thresholds.get('mem',90)}%"))
-    if disk is not None and disk >= thresholds.get("disk", 85):
-        alerts.append(make("agent-disk-/", "磁盘余量告警", f"挂载目录【/】的磁盘已使用容量为{disk:.2f}%，大于告警值{thresholds.get('disk',85)}%"))
+
+    disk_threshold = thresholds.get("disk", 85)
+    if disk_detail:
+        for d in disk_detail:
+            if d["percent"] >= disk_threshold:
+                alerts.append(make(
+                    f"agent-disk-{d['path']}",
+                    "磁盘余量告警",
+                    f"挂载目录【{d['path']}】的磁盘已使用容量为{d['percent']:.2f}%，大于告警值{disk_threshold}%",
+                ))
+    elif disk is not None and disk >= disk_threshold:
+        alerts.append(make("agent-disk-/", "磁盘余量告警", f"挂载目录【/】的磁盘已使用容量为{disk:.2f}%，大于告警值{disk_threshold}%"))
     return alerts

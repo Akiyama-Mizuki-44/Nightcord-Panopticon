@@ -21,6 +21,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "agent_config.yaml")
 EXTERNAL_IP_REFRESH_SECONDS = 1800  # 公网 IP 很少变，不用每轮上报都查一次
 EXTERNAL_IP_SERVICES = ("https://api.ipify.org", "https://ifconfig.me/ip")
+# psutil 的 disk_partitions(all=False) 在容器化的机器上仍然可能混进这些虚拟/伪文件系统，
+# 额外按 fstype 过滤一层，避免磁盘卡片里冒出一堆跟"真实容量"无关的挂载点
+_PSEUDO_FSTYPES = {"tmpfs", "devtmpfs", "overlay", "squashfs", "aufs", "proc", "sysfs"}
 
 
 def load_config():
@@ -57,11 +60,39 @@ def get_external_ip():
     return None
 
 
+def collect_disk_detail():
+    """
+    枚举本机所有真实挂载点的用量，不再只看根分区——服务器常见的"数据盘挂在别处"
+    （比如 /data、/mnt/backup）不该在磁盘卡片里彻底隐身。
+    返回 [{"path","total","used","percent"}, ...]，按 percent 从高到低排，方便一眼看到最紧张的盘。
+    """
+    detail = []
+    for part in psutil.disk_partitions(all=False):
+        if part.fstype in _PSEUDO_FSTYPES:
+            continue
+        try:
+            usage = psutil.disk_usage(part.mountpoint)
+        except (PermissionError, OSError):
+            continue  # 挂载点存在但读不到用量（权限/离线网络盘之类），跳过不影响其它盘
+        detail.append({
+            "path": part.mountpoint,
+            "total": usage.total,
+            "used": usage.used,
+            "percent": usage.percent,
+        })
+    detail.sort(key=lambda d: d["percent"], reverse=True)
+    return detail
+
+
 def collect(prev_net, prev_ts):
     """采集一次快照。网络吞吐由本次/上次 net_io_counters 的差值算出 kbps。"""
     cpu = psutil.cpu_percent(interval=1)
     mem = psutil.virtual_memory().percent
-    disk = psutil.disk_usage("/").percent
+    disk_detail = collect_disk_detail()
+    # 顶层 disk 字段保持向后兼容（历史趋势图那条线、阈值告警都读它）：
+    # 优先用根分区的百分比，万一根分区没采集到（理论上不该发生）就退而求其次用最紧张的那块盘
+    root = next((d for d in disk_detail if d["path"] == "/"), None)
+    disk = root["percent"] if root else (disk_detail[0]["percent"] if disk_detail else 0.0)
     net = psutil.net_io_counters()
     now = time.time()
 
@@ -74,6 +105,7 @@ def collect(prev_net, prev_ts):
         "cpu": cpu,
         "mem": mem,
         "disk": disk,
+        "disk_detail": disk_detail,
         "net_in_kbps": round(net_in_kbps, 2),
         "net_out_kbps": round(net_out_kbps, 2),
     }

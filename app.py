@@ -341,6 +341,7 @@ def _merge_qingyuan(results):
             "cpu": sample.get("cpu"),
             "mem": sample.get("mem"),
             "disk": sample.get("disk"),
+            "disk_detail": metrics_store.get_disk_detail(panel_name),
             "ts": sample.get("ts"),
             "ip_internal": ip.get("ip_internal"),
             "ip_external": ip.get("ip_external"),
@@ -403,6 +404,21 @@ def api_metrics_report():
 
     metrics_store.insert_sample(panel, ts, cpu, mem, disk, net_in_kbps, net_out_kbps)
     metrics_store.upsert_ip(panel, body.get("ip_internal"), body.get("ip_external"))
+
+    disk_detail = body.get("disk_detail")
+    if isinstance(disk_detail, list):
+        # 老版本 agent 不会带这个字段，新版本带了才存；随便什么畸形数据都别写进库里
+        clean = []
+        for d in disk_detail:
+            try:
+                clean.append({
+                    "path": str(d["path"]), "total": float(d["total"]),
+                    "used": float(d["used"]), "percent": float(d["percent"]),
+                })
+            except (KeyError, TypeError, ValueError):
+                continue
+        metrics_store.upsert_disk_detail(panel, clean)
+
     return jsonify({"ok": True})
 
 
@@ -624,7 +640,10 @@ def background_alert_loop():
             for panel_name in metrics_store.list_active_panels(time.time() - AGENT_STALE_SECONDS):
                 sample = metrics_store.get_latest(panel_name)
                 ip = metrics_store.get_ip(panel_name)
-                for alert in evaluate_agent_alerts(panel_name, sample, thresholds, ip["ip_external"], ip["ip_internal"]):
+                disk_detail = metrics_store.get_disk_detail(panel_name)
+                for alert in evaluate_agent_alerts(
+                    panel_name, sample, thresholds, ip["ip_external"], ip["ip_internal"], disk_detail,
+                ):
                     active_keys.add(alert["key"])
                     _notifier.notify(alert)
 
