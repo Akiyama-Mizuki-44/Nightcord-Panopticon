@@ -15,6 +15,7 @@ import threading
 import time
 import yaml
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlparse
 from flask import Flask, jsonify, request, send_from_directory, Response, stream_with_context, session, redirect, url_for
 from werkzeug.security import check_password_hash
 
@@ -327,10 +328,20 @@ def _merge_qingyuan(results):
     把青源（自建 agent）最新上报的数据叠加进 fetch_all() 的结果里：
     - 面板名跟某个宝塔面板对得上：把青源数据挂在同一张卡片上（同名机器装了两边），
       前端展示时青源数据优先（本机 agent 直采，比宝塔面板 API 转发的更实时更准）。
-    - 面板名对不上任何宝塔面板：说明这台机器只装了青源，没有对应的宝塔面板，
-      单独给它造一张卡片，否则它在主看板上永远不可见（只能去设置页的"已部署 agent"列表里找）。
+    - 名字对不上但 IP 对得上：兜底按 IP 合并——宝塔面板名字是手打的、青源 panel_name
+      默认取自远端 hostname，两套命名本来就没有必然关系，光靠名字很容易漏判（同一台机器
+      拆成两张卡片）。一键部署时选了"绑定到已有面板"就不会走到这个兜底分支，这里主要是
+      给部署在先的旧 agent、或者没走绑定流程的场景兜底。
+    - 名字、IP 都对不上：说明这台机器只装了青源，没有对应的宝塔面板，单独给它造一张卡片，
+      否则它在主看板上永远不可见（只能去设置页的"已部署 agent"列表里找）。
     """
     by_name = {r.get("name"): r for r in results}
+    by_ip = {}
+    for r in results:
+        host = urlparse(r.get("url") or "").hostname
+        if host:
+            by_ip.setdefault(host, r)
+
     since_ts = time.time() - AGENT_STALE_SECONDS
     for panel_name in metrics_store.list_active_panels(since_ts):
         sample = metrics_store.get_latest(panel_name)
@@ -346,7 +357,11 @@ def _merge_qingyuan(results):
             "ip_internal": ip.get("ip_internal"),
             "ip_external": ip.get("ip_external"),
         }
-        existing = by_name.get(panel_name)
+        existing = (
+            by_name.get(panel_name)
+            or by_ip.get(ip.get("ip_internal"))
+            or by_ip.get(ip.get("ip_external"))
+        )
         if existing is not None:
             existing["qingyuan"] = qingyuan
         else:
@@ -511,7 +526,7 @@ def _ensure_metrics_agent_secret(cfg):
     return changed
 
 
-def _deploy_and_report(ip, port, ssh_user, password, remember):
+def _deploy_and_report(ip, port, ssh_user, password, remember, panel_name_override=None):
     """
     一键装 agent 的公共逻辑，POST /api/agent/deploy 和 .../redeploy 都走这里。
     装一次动辄一两分钟（建虚拟环境、装依赖），干等着容易让人怀疑是不是卡死了，
@@ -561,6 +576,7 @@ def _deploy_and_report(ip, port, ssh_user, password, remember):
             panel_name = deploy_agent(
                 ip, port, ssh_user, password, report_url, shared_secret,
                 log=lambda line: q.put(("log", line)),
+                panel_name_override=panel_name_override,
             )
             result["ok"], result["panel_name"] = True, panel_name
         except AgentDeployError as e:
@@ -608,7 +624,21 @@ def api_agent_deploy():
     remember = bool(body.get("remember"))
     if not ip or not password:
         return jsonify({"error": "服务器 IP 和 SSH 密码不能为空"}), 400
-    return _deploy_and_report(ip, port, ssh_user, password, remember)
+
+    bind_panel = (body.get("bind_panel") or "").strip() or None
+    if bind_panel:
+        # 这台机器如果同时也是某个已配置的宝塔面板，让青源上报强制用那个面板的 name，
+        # 不然宝塔名字（手打的）和青源 panel_name（默认取自远端 hostname）大概率对不上，
+        # 同一台机器会在 dashboard 上拆成两张卡片。
+        try:
+            cfg = load_config()
+        except RuntimeError:
+            return jsonify({"error": "还没有 config.yaml"}), 400
+        known_names = {p.get("name") for p in cfg.get("panels", [])}
+        if bind_panel not in known_names:
+            return jsonify({"error": f"没找到名为「{bind_panel}」的宝塔面板"}), 400
+
+    return _deploy_and_report(ip, port, ssh_user, password, remember, panel_name_override=bind_panel)
 
 
 @app.route("/api/agent/hosts", methods=["GET"])
@@ -630,7 +660,14 @@ def api_agent_redeploy(host_id):
     cred = agent_hosts.get_host_credentials(cfg, host_id)
     if not cred:
         return jsonify({"error": "没找到这台已保存的服务器（可能当时没勾选记住密码，或密钥文件变了）"}), 404
-    return _deploy_and_report(cred["ip"], cred["port"], cred["ssh_user"], cred["password"], True)
+    # 沿用上次部署时实际用的 panel_name（不管当初是自动读的 hostname 还是手动绑定的宝塔面板名），
+    # 不重新探测 hostname——不然身份会在每次重新部署之间漂移，之前靠名字/IP 对上的卡片又会拆开。
+    saved = next((h for h in agent_hosts.list_hosts(cfg) if h["id"] == host_id), None)
+    panel_name_override = saved["panel_name"] if saved and saved.get("panel_name") else None
+    return _deploy_and_report(
+        cred["ip"], cred["port"], cred["ssh_user"], cred["password"], True,
+        panel_name_override=panel_name_override,
+    )
 
 
 @app.route("/api/agent/hosts/<path:host_id>", methods=["DELETE"])

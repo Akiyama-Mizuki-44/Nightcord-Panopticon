@@ -83,6 +83,12 @@
       <div><label>SSH 账号</label><input type="text" id="deployUser" value="root"></div>
       <div><label>密码</label><input type="password" id="deployPassword" placeholder="SSH 登录密码，验证方式：密码"></div>
     </div>
+    <label>这台机器是不是同时也是上面配置的某个宝塔面板？</label>
+    <select id="deployBindPanel">
+      <option value="">不绑定（用远端 hostname 当卡片名字）</option>
+    </select>
+    <div class="hint">选了的话青源上报会强制用那个面板的名字，两边数据合并显示在同一张卡片上；
+      不选、又跟某个面板同名或同 IP，dashboard 也会尽量自动合并，但不保证百分百对得上。</div>
     <div class="checkbox-row"><input type="checkbox" id="deployRemember"> 记住这台服务器的密码（加密保存，方便以后一键重装）</div>
     <div style="display:flex;gap:10px;align-items:center;margin-top:10px">
       <button class="primary" onclick="deployAgent()">一键安装</button>
@@ -338,6 +344,10 @@ async function load(){
   document.getElementById('emailFrom').value = em.from || '';
   document.getElementById('emailTo').value = (em.to||[]).join(', ');
   document.getElementById('emailHint').textContent = em.password === SECRET_PLACEHOLDER ? '已设置授权码（留空保持不变）' : '还没设置';
+
+  const bindSelect = document.getElementById('deployBindPanel');
+  bindSelect.innerHTML = '<option value="">不绑定（用远端 hostname 当卡片名字）</option>' +
+    (cfg.panels || []).map(p => `<option value="${escapeAttr(p.name)}">${escapeAttr(p.name)}</option>`).join('');
 }
 
 function collectPanels(){
@@ -515,6 +525,7 @@ async function deployAgent(){
   const ssh_user = document.getElementById('deployUser').value.trim() || 'root';
   const password = document.getElementById('deployPassword').value;
   const remember = document.getElementById('deployRemember').checked;
+  const bind_panel = document.getElementById('deployBindPanel').value;
   if(!ip || !password){
     msg.className = 'err';
     msg.textContent = '服务器 IP 和密码不能为空';
@@ -523,7 +534,7 @@ async function deployAgent(){
   await streamDeploy('/api/agent/deploy', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ip, port, ssh_user, password, remember}),
+    body: JSON.stringify({ip, port, ssh_user, password, remember, bind_panel}),
   }, msg, log, async () => {
     document.getElementById('deployPassword').value = '';
     await loadAgentHosts();
