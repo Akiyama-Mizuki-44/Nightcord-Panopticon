@@ -1,5 +1,5 @@
 """
-青源（Qingyuan）8.16-beta（内部开发代号 yukikaze）—— 自建系统指标监控 agent，
+青源（Qingyuan）7.17-beta（内部开发代号 yukisakura）—— 自建系统指标监控 agent，
 跑在各面板服务器上（不是 Panopticon 主机），定时采集本机 CPU/内存/磁盘/网络，
 push 给 Panopticon 的 /api/metrics/report。整体架构说明见仓库根目录 QINGYUAN.zh-CN.md。
 

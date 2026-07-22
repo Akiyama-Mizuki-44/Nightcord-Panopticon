@@ -54,7 +54,7 @@ ALERT_CHECK_INTERVAL = 60  # 秒，后台告警巡检间隔（与前端是否打
 AGENT_STALE_SECONDS = 180  # 秒，青源 agent 超过这么久没上报就不当它在线（默认上报间隔 60s，留够 3 倍余量）
 METRICS_PRUNE_INTERVAL = 3600  # 秒，自建监控 agent 历史数据的清理巡检间隔
 METRICS_REPORT_PATH = "/api/metrics/report"
-QINGYUAN_VERSION = "8.16-beta"  # 青源（自建系统指标监控架构）版本号，见 QINGYUAN.zh-CN.md
+QINGYUAN_VERSION = "7.17-beta"  # 青源（自建系统指标监控架构）版本号，见 QINGYUAN.zh-CN.md
 
 
 def load_config():
