@@ -1,3 +1,6 @@
 flask>=2.3
 requests>=2.31
 pyyaml>=6.0
+paramiko>=3.4
+cryptography>=41
+webauthn>=2.0

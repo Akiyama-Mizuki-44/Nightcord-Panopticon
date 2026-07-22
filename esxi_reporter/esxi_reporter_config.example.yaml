@@ -1,0 +1,16 @@
+# 复制为 esxi_reporter_config.yaml 后填写真实信息，esxi_reporter_config.yaml 不要提交到公开仓库
+report_url: "http://10.10.0.5:1810/api/metrics/report"  # Panopticon 主机的 WireGuard 内网地址
+shared_secret: "跟 Panopticon config.yaml 里 metrics_agent.shared_secret 保持一致"
+interval_seconds: 60  # 必须小于 Panopticon 那边的 AGENT_STALE_SECONDS（180s），否则会被判定离线
+
+# 每台 ESXi 主机一条，key 就是最后在 Panopticon 主看板上显示的卡片名字。
+# 账号建议用只读角色（vSphere 里给 Read-only 角色即可，这个脚本不需要任何写权限）。
+esxi_hosts:
+  esxi-1:
+    host: "192.168.3.230"
+    user: "readonly_user"
+    password: "..."
+  esxi-2:
+    host: "192.168.3.240"
+    user: "readonly_user"
+    password: "..."

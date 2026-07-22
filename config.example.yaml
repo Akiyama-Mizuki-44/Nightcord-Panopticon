@@ -28,6 +28,9 @@ nightcord_status:
 # Dashboard 自身的登录保护（Panopticon 打算长期暴露公网时务必开启）
 # 用法：
 #   python gen_password_hash.py "你的密码"   # 生成 password_hash，粘到下面
+# 也支持 Passkey（免密码，指纹/人脸/安全密钥）登录，密码登录始终保留作为备用方式；
+# Passkey 在 /settings 页面里添加，不用手填这里，添加后会自动出现 passkeys 字段。
+# 注意：Passkey 需要通过 HTTPS 访问（127.0.0.1/localhost 除外），纯 WireGuard 内网 HTTP 访问用不了。
 dashboard_auth:
   enabled: false                # 只在 WireGuard 内网访问、不打算公网暴露时可以设 false
   username: "mizuki"
@@ -35,9 +38,26 @@ dashboard_auth:
   max_attempts: 5                # 同一 IP 连续失败这么多次后锁定
   lockout_seconds: 900           # 锁定时长（秒），默认 15 分钟
 
+# 自建监控 agent（agent/metrics_agent.py，跑在各面板服务器上）上报系统指标历史的接收端配置。
+# agent 侧的 agent_config.yaml 里 shared_secret 要跟这里填的一致。
+metrics_agent:
+  enabled: false
+  shared_secret: "生成一个随机字符串，agent 和 Panopticon 两边要一致"
+  retention_days: 30   # 超过这么多天的历史数据会被自动清理
+  # 设置页"一键部署 agent"用来生成 agent_config.yaml 里 report_url 的基础地址。
+  # 不填的话会用你点"一键安装"那一刻浏览器访问设置页的地址来猜——如果你是通过
+  # SSH 隧道 / 127.0.0.1 访问设置页、但部署目标是别的机器，这个猜测就是错的：
+  # agent 会拿到一个只在它自己身上才有意义的地址，上报永远静默失败，也不会有任何报错提示。
+  # 强烈建议只要会给"本机以外"的机器装 agent，就把这里填成 agent 那边能访问到 Panopticon 的
+  # 真实地址（通常是 WireGuard 内网地址），比如 "http://10.10.0.1:1810"。
+  report_url: ""
+
 # 告警通知（面板离线 / CPU / 内存 / 磁盘超阈值时推送）
+# 阈值同时适用于宝塔面板和青源（自建 agent，见 metrics_agent 段）上报的机器。
 notifications:
-  cooldown_seconds: 600   # 同一条告警的最小推送间隔，避免刷屏
+  # 同一个问题（比如"面板A的CPU告警"）只在刚触发时发一次，问题没解决之前不会重复推送；
+  # 这个值只在"问题解决后又复发"时起作用——两次触发间隔小于它，就当是抖动，先不通知。
+  cooldown_seconds: 600
 
   thresholds:
     cpu: 90    # CPU 使用率 %
@@ -46,7 +66,8 @@ notifications:
 
   feishu:
     enabled: false
-    # 飞书群 -> 设置 -> 群机器人 -> 添加"自定义机器人"，复制 Webhook 地址
+    # 飞书群 -> 设置 -> 群机器人 -> 添加"自定义机器人"，复制 Webhook 地址。
+    # 推送的是卡片消息（含 @所有人），机器人要关闭"签名校验"，否则会发送失败。
     webhook: "https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 
   email:

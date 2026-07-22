@@ -103,6 +103,12 @@ def merge_submitted(old_cfg: dict, submitted: dict):
         "max_attempts": int(da_in.get("max_attempts") or old_da.get("max_attempts", 5) or 5),
         "lockout_seconds": int(da_in.get("lockout_seconds") or old_da.get("lockout_seconds", 900) or 900),
     }
+    # session_secret / passkeys 不通过这个通用表单编辑（有各自专门的接口），
+    # 原样带过去，不然保存一次设置就会把已登录的 session 和已注册的 Passkey 全清空。
+    if old_da.get("session_secret"):
+        merged_da["session_secret"] = old_da["session_secret"]
+    if old_da.get("passkeys"):
+        merged_da["passkeys"] = old_da["passkeys"]
     new_password = _clean_str(da_in.get("new_password"))
     if new_password:
         merged_da["password_hash"] = generate_password_hash(new_password)
@@ -160,5 +166,9 @@ def merge_submitted(old_cfg: dict, submitted: dict):
         },
     }
 
-    merged = {"panels": merged_panels, "dashboard_auth": merged_da, "notifications": merged_notif}
+    # 从 old_cfg 出发再覆盖显式处理过的顶层键，而不是整个重建：
+    # 这样 nightcord_status / metrics_agent 这些没有设置页 UI 的顶层配置段
+    # 不会在保存 /settings 表单时被静默抹掉。
+    merged = dict(old_cfg)
+    merged.update({"panels": merged_panels, "dashboard_auth": merged_da, "notifications": merged_notif})
     return merged, errors

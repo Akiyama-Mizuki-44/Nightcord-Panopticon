@@ -1,0 +1,17 @@
+[Unit]
+Description=Nightcord Panopticon ESXi metrics reporter (via vSphere API)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+# 这台机器（比如 FreePBX）已经在用只读账号连 ESXi 查状态了（status_daemon.py），
+# 这个脚本是独立的 systemd unit，跟 status_daemon.py 互不影响，哪个挂了都不连累另一个。
+WorkingDirectory=/path/to/esxi_reporter
+Environment=PATH=/path/to/esxi_reporter/.venv/bin
+ExecStart=/path/to/esxi_reporter/.venv/bin/python esxi_metrics_reporter.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

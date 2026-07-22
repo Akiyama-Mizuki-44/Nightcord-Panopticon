@@ -43,6 +43,7 @@
            padding:20px 0 8px;display:flex;gap:10px;align-items:center}
   #msg{font-size:13px}
   #msg.ok{color:var(--ok)} #msg.err{color:var(--bad)}
+  #feishuTestMsg.ok{color:var(--ok)} #feishuTestMsg.err{color:var(--bad)}
   .hint{color:var(--muted);font-size:11px;margin-top:4px}
   footer{padding:24px 28px;text-align:center;color:var(--muted);font-size:11px}
 </style>
@@ -66,6 +67,35 @@
     <div class="desc">每台宝塔面板的地址、API 密钥。地址建议填 WireGuard 内网地址（如 <code>http://10.10.0.2:18101</code>）。</div>
     <div id="panels"></div>
     <button class="add" onclick="addPanelRow()">+ 添加面板</button>
+  </section>
+
+  <section>
+    <h2>一键部署 agent（青源）</h2>
+    <div class="desc">
+      填目标服务器的 SSH 信息，自动 SSH 上去装好青源 agent（系统指标监控）并注册成 systemd 常驻服务，
+      不用再手动 SSH 上去改 yaml。密码只在这次安装过程里用一次；勾选"记住密码"才会加密后保存，方便以后一键重装。
+    </div>
+    <div class="row3" style="grid-template-columns:2fr 1fr">
+      <div><label>服务器 IP</label><input type="text" id="deployIp" placeholder="10.10.0.5"></div>
+      <div><label>端口</label><input type="number" id="deployPort" value="22"></div>
+    </div>
+    <div class="row2">
+      <div><label>SSH 账号</label><input type="text" id="deployUser" value="root"></div>
+      <div><label>密码</label><input type="password" id="deployPassword" placeholder="SSH 登录密码，验证方式：密码"></div>
+    </div>
+    <div class="checkbox-row"><input type="checkbox" id="deployRemember"> 记住这台服务器的密码（加密保存，方便以后一键重装）</div>
+    <div style="display:flex;gap:10px;align-items:center;margin-top:10px">
+      <button class="primary" onclick="deployAgent()">一键安装</button>
+      <span id="deployMsg"></span>
+    </div>
+    <pre id="deployLog" style="display:none;background:#0c0e13;border:1px solid var(--border);border-radius:8px;
+         padding:10px 12px;font-size:12px;color:var(--muted);white-space:pre-wrap;max-height:240px;
+         overflow:auto;margin-top:10px"></pre>
+
+    <div style="margin-top:16px">
+      <div class="desc" style="margin-bottom:8px">已记住密码的服务器：</div>
+      <div id="agentHosts"></div>
+    </div>
   </section>
 
   <section>
@@ -96,6 +126,14 @@
   </section>
 
   <section>
+    <h2>Passkey（免密码登录）</h2>
+    <div class="desc">用设备生物识别 / 安全密钥登录，密码登录依然保留作为备用方式。需要通过 HTTPS 访问（本机 localhost 除外）。</div>
+    <div id="passkeyList"></div>
+    <button class="add" onclick="addPasskey()">+ 添加本设备的 Passkey</button>
+    <div class="hint" id="passkeyHint"></div>
+  </section>
+
+  <section>
     <h2>告警阈值</h2>
     <div class="desc">CPU / 内存 / 磁盘使用率超过这个百分比就触发告警。</div>
     <div class="row2" style="grid-template-columns:1fr 1fr 1fr">
@@ -114,6 +152,9 @@
     <label>Webhook 地址</label>
     <input type="password" id="feishuWebhook" placeholder="留空则不修改">
     <div class="hint" id="feishuHint"></div>
+    <div class="hint">测试用的是<b>已保存</b>的配置，改了 Webhook 要先"保存配置"再测试。</div>
+    <button type="button" onclick="testFeishu()">发送测试通知</button>
+    <span id="feishuTestMsg" class="hint"></span>
   </section>
 
   <section>
@@ -168,6 +209,92 @@ function addPanelRow(p){
 
 function escapeAttr(s){
   return (s||'').replace(/"/g, '&quot;');
+}
+
+function base64urlToBuffer(base64url){
+  const base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
+  const pad = base64.length % 4 ? '='.repeat(4 - base64.length % 4) : '';
+  const raw = atob(base64 + pad);
+  const buf = new Uint8Array(raw.length);
+  for(let i=0;i<raw.length;i++) buf[i] = raw.charCodeAt(i);
+  return buf.buffer;
+}
+
+function bufferToBase64url(buf){
+  const bytes = new Uint8Array(buf);
+  let str = '';
+  for(const b of bytes) str += String.fromCharCode(b);
+  return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function loadPasskeys(){
+  const res = await fetch('/api/webauthn/passkeys');
+  if(!res.ok) return;
+  const list = await res.json();
+  const el = document.getElementById('passkeyList');
+  el.innerHTML = '';
+  if(!list.length){
+    el.innerHTML = '<div class="hint">还没有添加任何 Passkey</div>';
+    return;
+  }
+  list.forEach(p => {
+    const date = p.created_at ? new Date(p.created_at * 1000).toLocaleString() : '';
+    el.insertAdjacentHTML('beforeend', `<div class="panel-card">
+      <button class="remove" onclick="deletePasskey('${p.credential_id}')">删除</button>
+      <div>${escapeAttr(p.name)}</div>
+      <div class="hint">添加于 ${date}</div>
+    </div>`);
+  });
+}
+
+async function deletePasskey(id){
+  await fetch('/api/webauthn/passkeys/' + encodeURIComponent(id), {method: 'DELETE'});
+  loadPasskeys();
+}
+
+async function addPasskey(){
+  const hint = document.getElementById('passkeyHint');
+  if(!window.PublicKeyCredential){
+    hint.textContent = '当前浏览器不支持 Passkey';
+    return;
+  }
+  const name = prompt('给这个 Passkey 起个名字（例如：我的 MacBook）', '') || '未命名 Passkey';
+  hint.textContent = '等待设备验证…';
+  try{
+    const optRes = await fetch('/api/webauthn/register/options');
+    const options = await optRes.json();
+    if(!optRes.ok){ hint.textContent = options.error || '获取注册选项失败'; return; }
+
+    options.challenge = base64urlToBuffer(options.challenge);
+    options.user.id = base64urlToBuffer(options.user.id);
+    if(options.excludeCredentials){
+      options.excludeCredentials = options.excludeCredentials.map(c => ({...c, id: base64urlToBuffer(c.id)}));
+    }
+
+    const cred = await navigator.credentials.create({publicKey: options});
+    const credential = {
+      id: cred.id,
+      rawId: bufferToBase64url(cred.rawId),
+      type: cred.type,
+      response: {
+        clientDataJSON: bufferToBase64url(cred.response.clientDataJSON),
+        attestationObject: bufferToBase64url(cred.response.attestationObject),
+      },
+      clientExtensionResults: cred.getClientExtensionResults(),
+    };
+
+    const verifyRes = await fetch('/api/webauthn/register/verify', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({credential, name}),
+    });
+    const result = await verifyRes.json();
+    if(!verifyRes.ok){ hint.textContent = result.error || '注册失败'; return; }
+    hint.textContent = '添加成功 ✓';
+    loadPasskeys();
+  }catch(err){
+    hint.textContent = '添加失败：' + err;
+  }
 }
 
 async function load(){
@@ -283,7 +410,141 @@ async function save(){
   }
 }
 
+async function loadAgentHosts(){
+  const res = await fetch('/api/agent/hosts');
+  const data = await res.json();
+  const wrap = document.getElementById('agentHosts');
+  const hosts = data.hosts || [];
+  if(!hosts.length){
+    wrap.innerHTML = '<div class="hint">还没有记住任何服务器的密码。</div>';
+    return;
+  }
+  wrap.innerHTML = hosts.map(h => `
+    <div class="panel-card" style="padding:8px 12px" data-host-id="${escapeAttr(h.id)}">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+        <div style="font-size:13px">
+          <strong>${escapeAttr(h.panel_name || h.ip)}</strong><br>
+          <span class="hint">${escapeAttr(h.ssh_user)}@${escapeAttr(h.ip)}:${h.port}</span>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="redeploy-btn">重新安装</button>
+          <button class="delete-btn" style="color:var(--bad)">删除</button>
+        </div>
+      </div>
+    </div>
+  `).join('');
+  wrap.querySelectorAll('.redeploy-btn').forEach(btn => {
+    btn.onclick = () => redeployHost(btn.closest('[data-host-id]').dataset.hostId);
+  });
+  wrap.querySelectorAll('.delete-btn').forEach(btn => {
+    btn.onclick = () => deleteHost(btn.closest('[data-host-id]').dataset.hostId);
+  });
+}
+
+async function streamDeploy(url, options, msg, log, onDone){
+  // /api/agent/deploy 和 .../redeploy 返回的是 NDJSON 流（一行一个 JSON），
+  // 装的过程（建虚拟环境、装依赖）动辄一两分钟，边跑边把日志行 push 过来，
+  // 不用像以前那样干等到最后才看到一大坨文字。
+  msg.className = '';
+  msg.textContent = '安装中，可能需要一两分钟…';
+  log.style.display = 'block';
+  log.textContent = '';
+  try{
+    const res = await fetch(url, options);
+    if(!res.ok || !res.body){
+      const data = await res.json().catch(() => ({}));
+      msg.className = 'err';
+      msg.textContent = '安装失败：' + (data.error || `HTTP ${res.status}`);
+      log.style.display = 'none';
+      return;
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while(true){
+      const {value, done} = await reader.read();
+      if(done) break;
+      buf += decoder.decode(value, {stream: true});
+      let idx;
+      while((idx = buf.indexOf('\n')) >= 0){
+        const line = buf.slice(0, idx);
+        buf = buf.slice(idx + 1);
+        if(!line.trim()) continue;
+        const evt = JSON.parse(line);
+        if(evt.type === 'log'){
+          log.textContent += evt.line + '\n';
+          log.scrollTop = log.scrollHeight;
+        } else if(evt.type === 'done'){
+          if(evt.ok){
+            msg.className = 'ok';
+            msg.textContent = `安装成功 ✓（面板名：${evt.panel_name}）`;
+            if(onDone) await onDone(evt);
+          } else {
+            msg.className = 'err';
+            msg.textContent = '安装失败：' + (evt.error || '未知错误');
+          }
+        }
+      }
+    }
+  }catch(e){
+    msg.className = 'err';
+    msg.textContent = '请求失败：' + e;
+  }
+}
+
+async function testFeishu(){
+  const msg = document.getElementById('feishuTestMsg');
+  msg.className = 'hint';
+  msg.textContent = '发送中…';
+  try{
+    const res = await fetch('/api/notifications/test', {method: 'POST'});
+    const data = await res.json();
+    msg.className = data.ok ? 'ok' : 'err';
+    msg.textContent = data.message || data.error || (data.ok ? '成功' : '失败');
+  }catch(e){
+    msg.className = 'err';
+    msg.textContent = '请求失败：' + e;
+  }
+}
+
+async function deployAgent(){
+  const msg = document.getElementById('deployMsg');
+  const log = document.getElementById('deployLog');
+  const ip = document.getElementById('deployIp').value.trim();
+  const port = parseInt(document.getElementById('deployPort').value) || 22;
+  const ssh_user = document.getElementById('deployUser').value.trim() || 'root';
+  const password = document.getElementById('deployPassword').value;
+  const remember = document.getElementById('deployRemember').checked;
+  if(!ip || !password){
+    msg.className = 'err';
+    msg.textContent = '服务器 IP 和密码不能为空';
+    return;
+  }
+  await streamDeploy('/api/agent/deploy', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ip, port, ssh_user, password, remember}),
+  }, msg, log, async () => {
+    document.getElementById('deployPassword').value = '';
+    await loadAgentHosts();
+  });
+}
+
+async function redeployHost(id){
+  const msg = document.getElementById('deployMsg');
+  const log = document.getElementById('deployLog');
+  await streamDeploy(`/api/agent/hosts/${encodeURIComponent(id)}/redeploy`, {method: 'POST'}, msg, log);
+}
+
+async function deleteHost(id){
+  if(!confirm('删除这台服务器记住的密码？（不会卸载已经装好的 agent，只是以后不能一键重装了）')) return;
+  await fetch(`/api/agent/hosts/${encodeURIComponent(id)}`, {method: 'DELETE'});
+  await loadAgentHosts();
+}
+
 load();
+loadAgentHosts();
+loadPasskeys();
 </script>
 </body>
 </html>

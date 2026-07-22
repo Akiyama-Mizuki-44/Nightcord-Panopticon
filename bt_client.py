@@ -6,7 +6,10 @@
 所有请求统一使用 POST，参数放在 query string 中（官方 demo 的常见用法）。
 """
 import hashlib
+import socket
 import time
+from urllib.parse import urlparse
+
 import requests
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 
@@ -26,6 +29,11 @@ class BTClient:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.verify_ssl = verify_ssl
+        # collect_all() 一次要打好几个请求，用同一个 Session 复用连接和 cookie，
+        # 符合宝塔官方文档"注意事项"里"请保存 cookie，并在每次请求时附上 cookie"的要求。
+        self.session = requests.Session()
+        self.session.headers.update({"User-Agent": USER_AGENT})
+        self.session.verify = verify_ssl
 
     def _sign(self):
         request_time = str(int(time.time()))
@@ -39,13 +47,7 @@ class BTClient:
             params.update(extra)
         url = f"{self.base_url}{path}"
         try:
-            resp = requests.post(
-                url,
-                params=params,
-                headers={"User-Agent": USER_AGENT},
-                timeout=DEFAULT_TIMEOUT,
-                verify=self.verify_ssl,
-            )
+            resp = self.session.post(url, params=params, timeout=DEFAULT_TIMEOUT)
             resp.raise_for_status()
             return resp.json()
         except Exception as e:
@@ -72,9 +74,26 @@ class BTClient:
     def databases(self, limit: int = 100):
         return self._call("/data?action=getData&table=databases", {"limit": limit, "p": 1})
 
+    def _resolve_external_ip(self):
+        """宝塔面板没有 agent 跑在本机，拿不到真内网 IP；只能把面板 url 的 host 解析成 IP 当"外网 IP"参考。"""
+        host = urlparse(self.base_url).hostname
+        if not host:
+            return None
+        try:
+            return socket.gethostbyname(host)
+        except OSError:
+            return None
+
     def collect_all(self):
         """汇总一台面板的所有信息，单项失败不影响其它项"""
-        result = {"name": self.name, "url": self.base_url, "online": True, "error": None}
+        result = {
+            "name": self.name,
+            "url": self.base_url,
+            "online": True,
+            "error": None,
+            "ip_external": self._resolve_external_ip(),
+            "ip_internal": None,  # 宝塔面板没部署青源 agent，拿不到真内网 IP
+        }
 
         def safe(fn, key):
             try:
@@ -89,4 +108,5 @@ class BTClient:
         safe(self.disk_info, "disk")
         safe(self.sites, "sites")
         safe(self.databases, "databases")
+        self.session.close()
         return result
