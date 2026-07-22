@@ -44,6 +44,13 @@ metrics_agent:
   enabled: false
   shared_secret: "生成一个随机字符串，agent 和 Panopticon 两边要一致"
   retention_days: 30   # 超过这么多天的历史数据会被自动清理
+  # 设置页"一键部署 agent"用来生成 agent_config.yaml 里 report_url 的基础地址。
+  # 不填的话会用你点"一键安装"那一刻浏览器访问设置页的地址来猜——如果你是通过
+  # SSH 隧道 / 127.0.0.1 访问设置页、但部署目标是别的机器，这个猜测就是错的：
+  # agent 会拿到一个只在它自己身上才有意义的地址，上报永远静默失败，也不会有任何报错提示。
+  # 强烈建议只要会给"本机以外"的机器装 agent，就把这里填成 agent 那边能访问到 Panopticon 的
+  # 真实地址（通常是 WireGuard 内网地址），比如 "http://10.10.0.1:1810"。
+  report_url: ""
 
 # 告警通知（面板离线 / CPU / 内存 / 磁盘超阈值时推送）
 # 阈值同时适用于宝塔面板和青源（自建 agent，见 metrics_agent 段）上报的机器。

@@ -528,14 +528,36 @@ def _deploy_and_report(ip, port, ssh_user, password, remember):
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             yaml.safe_dump(cfg, f, allow_unicode=True, sort_keys=False)
 
-    report_url = f"{request.scheme}://{request.host}{METRICS_REPORT_PATH}"
+    ma_cfg = cfg.get("metrics_agent", {})
+    report_url_override = (ma_cfg.get("report_url") or "").rstrip("/")
+    if report_url_override:
+        report_url = report_url_override + METRICS_REPORT_PATH
+    else:
+        # 没配 report_url 就退而求其次，猜"管理员这一刻访问设置页用的地址"就是 agent 该上报的地址——
+        # 这个猜测在通过 SSH 隧道／127.0.0.1 访问设置页、但部署目标是别的机器时是错的：
+        # agent 会拿到一个只在"本机自己"才有意义的地址，上报永远静默失败，dashboard 上永远不会出现这张卡片。
+        report_url = f"{request.scheme}://{request.host}{METRICS_REPORT_PATH}"
     shared_secret = cfg["metrics_agent"]["shared_secret"]
 
     q = queue.Queue()
     result = {}
+    request_host = request.host.split(":")[0]
+    is_risky_guess = (
+        not report_url_override
+        and request_host in ("127.0.0.1", "localhost")
+        and ip not in ("127.0.0.1", "localhost")
+    )
 
     def worker():
         try:
+            if is_risky_guess:
+                q.put(("log",
+                    f"⚠️ 你现在是通过 127.0.0.1 访问设置页的（大概率走了 SSH 隧道），"
+                    f"但部署目标 {ip} 不是本机——agent 会被塞进一个只在它自己身上才有意义的上报地址"
+                    f"（{report_url}），装完大概率永远收不到数据，dashboard 也不会出现这张卡片。"
+                    f"建议先在 config.yaml 的 metrics_agent.report_url 里手动填一个 agent 那边"
+                    f"能访问到的 Panopticon 地址（比如 WireGuard 内网地址），再重新部署。"
+                ))
             panel_name = deploy_agent(
                 ip, port, ssh_user, password, report_url, shared_secret,
                 log=lambda line: q.put(("log", line)),

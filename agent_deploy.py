@@ -97,7 +97,11 @@ def deploy_agent(ip, port, ssh_user, password, report_url, shared_secret, log=No
             ssh, "/etc/systemd/system/nightcord-metrics-agent.service", unit, password, is_root, emit,
         )
         _run_privileged(ssh, "systemctl daemon-reload", password, is_root, emit)
-        _run_privileged(ssh, f"systemctl enable --now {SERVICE_NAME}", password, is_root, emit)
+        _run_privileged(ssh, f"systemctl enable {SERVICE_NAME}", password, is_root, emit)
+        # 用 restart 而不是 "enable --now"：后者对已经在跑的服务是空操作，不会重启，
+        # 重新部署时新写的 agent_config.yaml（比如改过的 report_url）永远不会被已存活的旧进程读到。
+        # restart 对"服务本来就没起过"和"服务已经在跑"两种情况都能正确生效，行为一致。
+        _run_privileged(ssh, f"systemctl restart {SERVICE_NAME}", password, is_root, emit)
 
         time.sleep(1.5)  # 给 systemd 一点时间把服务从 activating 拉到 active
         status = _run(ssh, f"systemctl is-active {SERVICE_NAME}", emit, check=False).strip()
