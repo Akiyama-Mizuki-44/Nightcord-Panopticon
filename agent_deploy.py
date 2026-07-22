@@ -26,8 +26,15 @@ class AgentDeployError(Exception):
     """部署失败，message 可以直接原样展示给前端。"""
 
 
-def deploy_agent(ip, port, ssh_user, password, report_url, shared_secret, log=None):
-    """返回部署成功后使用的 panel_name（取自目标机器的 hostname）。失败抛 AgentDeployError。"""
+def deploy_agent(ip, port, ssh_user, password, report_url, shared_secret, log=None, panel_name_override=None):
+    """
+    返回部署成功后使用的 panel_name（默认取自目标机器的 hostname，除非传了 panel_name_override）。
+    失败抛 AgentDeployError。
+
+    panel_name_override：如果这台机器同时也是某个已配置的宝塔面板，应该传那个面板配置里的 name，
+    强制让青源上报用同一个名字——不然宝塔面板名字（管理员手打的）和青源 panel_name（自动读远端
+    hostname）是两套互不相干的命名，十有八九对不上，dashboard 上同一台机器会拆成两张卡片。
+    """
     def emit(line):
         if log:
             log(line)
@@ -53,10 +60,14 @@ def deploy_agent(ip, port, ssh_user, password, report_url, shared_secret, log=No
 
         is_root = ssh_user == "root"
 
-        home, panel_name = _run(ssh, "echo $HOME && hostname", emit).strip().splitlines()[-2:]
-        home, panel_name = home.strip(), panel_name.strip() or ip
+        home, hostname = _run(ssh, "echo $HOME && hostname", emit).strip().splitlines()[-2:]
+        home, hostname = home.strip(), hostname.strip() or ip
+        panel_name = panel_name_override or hostname
         remote_dir = f"{home}/{REMOTE_DIR_NAME}"
-        emit(f"目标机器 hostname：{panel_name}，安装目录：{remote_dir}")
+        if panel_name_override:
+            emit(f"目标机器 hostname：{hostname}，但按指定绑定到面板「{panel_name}」，安装目录：{remote_dir}")
+        else:
+            emit(f"目标机器 hostname：{panel_name}，安装目录：{remote_dir}")
 
         _run(ssh, f"mkdir -p {remote_dir}", emit)
 
